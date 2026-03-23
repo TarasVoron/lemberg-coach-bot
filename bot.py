@@ -22,12 +22,15 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is missing. Copy .env.example to .env and fill BOT_TOKEN.")
 
 MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
-DAILY_HOUR = int(os.getenv("DAILY_HOUR", "9"))  # Europe/Berlin by default
+DAILY_HOUR = int(os.getenv("DAILY_HOUR", "9"))
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
-QUOTES_PATH = BASE_DIR / "quotes.json"
+DATA_DIR = BASE_DIR / "data"
+MOTIVATIONS_PATH = DATA_DIR / "motivations.json"
+TASKS_PATH = DATA_DIR / "tasks.json"
+TIPS_PATH = DATA_DIR / "tips.json"
 USERS_PATH = BASE_DIR / "users.json"
 
 logging.basicConfig(
@@ -36,10 +39,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("lemberg-coach-bot")
 
+
 # ---------- Data helpers ----------
-def load_quotes():
-    with open(QUOTES_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_json_list(path: Path, fallback: list[str]) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list) and data:
+                return data
+    except Exception as e:
+        log.warning("Failed to load %s: %s", path.name, e)
+    return fallback
+
 
 def load_users() -> set[int]:
     try:
@@ -48,34 +59,61 @@ def load_users() -> set[int]:
     except Exception:
         return set()
 
+
 def save_users(user_ids: set[int]):
     with open(USERS_PATH, "w", encoding="utf-8") as f:
         json.dump(sorted(list(user_ids)), f, ensure_ascii=False, indent=2)
 
-def today_content():
-    """
-    Вибір контенту детермінований від дати (Europe/Berlin),
-    тож протягом дня він незмінний і однаковий для всіх.
-    """
-    quotes = load_quotes()
-    if not quotes:
-        return {"quote": "Сьогодні без цитати.", "action": "Додай новий контент у quotes.json."}
 
+def get_day_index() -> int:
     base = datetime(2025, 1, 1, tzinfo=BERLIN)
     now = datetime.now(BERLIN)
-    days = (now.date() - base.date()).days
-    idx = days % len(quotes)
-    return quotes[idx]
+    return (now.date() - base.date()).days
+
+
+def get_today_motivation() -> str:
+    items = load_json_list(
+        MOTIVATIONS_PATH,
+        ["Сьогодні твоя сила — просто не зупинятися."]
+    )
+    return items[get_day_index() % len(items)]
+
+
+def get_today_task() -> str:
+    items = load_json_list(
+        TASKS_PATH,
+        ["Зроби одну маленьку, але корисну дію для свого майбутнього."]
+    )
+    return items[get_day_index() % len(items)]
+
+
+def get_today_tip() -> str:
+    items = load_json_list(
+        TIPS_PATH,
+        ["Краще маленький прогрес, ніж велике відкладання."]
+    )
+    return items[get_day_index() % len(items)]
+
+
+def today_content() -> dict:
+    return {
+        "motivation": get_today_motivation(),
+        "task": get_today_task(),
+        "tip": get_today_tip(),
+    }
+
 
 # ---------- UI builders ----------
 def main_menu_kb():
     buttons = [
         [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="get_motivation")],
-        [InlineKeyboardButton("✅ Завдання дня", callback_data="get_action")]
+        [InlineKeyboardButton("✅ Завдання дня", callback_data="get_task")],
+        [InlineKeyboardButton("💡 Порада дня", callback_data="get_tip")]
     ]
     if MINI_APP_URL:
         buttons.append([InlineKeyboardButton("🧭 Відкрити Mini App", url=MINI_APP_URL)])
     return InlineKeyboardMarkup(buttons)
+
 
 # ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,34 +127,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 Привіт! Це <b>Lemberg Coach Bot</b>.\n\n"
         "Щодня ти отримуватимеш:\n"
-        "• 🧠 <b>Цитату дня</b>\n"
-        "• 🎯 <b>Завдання для дії</b>\n\n"
-        "Натисни кнопку нижче, щоб почати."
+        "• 🧠 <b>Мотивацію дня</b>\n"
+        "• 🎯 <b>Завдання дня</b>\n"
+        "• 💡 <b>Пораду дня</b>\n\n"
+        "Натисни кнопку нижче."
     )
     await update.effective_message.reply_text(
-        text, reply_markup=main_menu_kb(), parse_mode=ParseMode.HTML
+        text,
+        reply_markup=main_menu_kb(),
+        parse_mode=ParseMode.HTML
     )
+
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "Доступні команди:\n"
         "/start — меню\n"
-        "/ping — швидка перевірка\n"
-        "/subscribe — підписатися на щоденні повідомлення\n"
-        "/unsubscribe — відписатися від щоденних повідомлень\n"
-        "/today — показати сьогоднішні цитату та завдання\n"
+        "/ping — перевірка\n"
+        "/subscribe — підписка\n"
+        "/unsubscribe — відписка\n"
+        "/today — показати весь контент дня\n"
         "/help — допомога"
     )
+
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
     await update.effective_message.reply_text(f"✅ Пінг! {now} (Europe/Berlin)")
 
+
 async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = load_users()
     users.add(update.effective_chat.id)
     save_users(users)
-    await update.effective_message.reply_text("✅ Підписано на щоденні повідомлення о %02d:00." % DAILY_HOUR)
+    await update.effective_message.reply_text(
+        "✅ Підписано на щоденні повідомлення о %02d:00." % DAILY_HOUR
+    )
+
 
 async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = load_users()
@@ -125,13 +172,20 @@ async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_users(users)
     await update.effective_message.reply_text("❎ Відписано від щоденних повідомлень.")
 
+
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = today_content()
     text = (
-        f"🧠 <b>Цитата дня</b>\n“{content['quote']}”\n\n"
-        f"🎯 <b>Завдання дня</b>\n{content['action']}"
+        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
+        f"🎯 <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"💡 <b>Порада дня</b>\n{content['tip']}"
     )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+    await update.effective_message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_kb()
+    )
+
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -140,9 +194,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = today_content()
 
     if query.data == "get_motivation":
-        text = f"🧠 <b>Цитата</b>\n\n“{content['quote']}”"
-    elif query.data == "get_action":
-        text = f"🎯 <b>Завдання</b>\n\n{content['action']}"
+        text = f"🧠 <b>Мотивація дня</b>\n\n{content['motivation']}"
+    elif query.data == "get_task":
+        text = f"🎯 <b>Завдання дня</b>\n\n{content['task']}"
+    elif query.data == "get_tip":
+        text = f"💡 <b>Порада дня</b>\n\n{content['tip']}"
     else:
         text = "Невідома дія. Спробуй ще раз."
 
@@ -153,11 +209,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_kb()
         )
     except BadRequest as e:
-        # Коли тицяють ту саму кнопку і текст не міняється — Telegram кидає 400 "Message is not modified".
         if "Message is not modified" in str(e):
-            # Просто мовчки ігноруємо — все й так показано актуальне.
             return
         raise
+
 
 # ---------- Scheduler ----------
 async def daily_push(context: ContextTypes.DEFAULT_TYPE):
@@ -165,10 +220,13 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE):
     users = load_users()
     if not users:
         return
+
     text = (
-        f"🧠 <b>Цитата дня</b>\n“{content['quote']}”\n\n"
-        f"🎯 <b>Завдання дня</b>\n{content['action']}"
+        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
+        f"🎯 <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"💡 <b>Порада дня</b>\n{content['tip']}"
     )
+
     for uid in users:
         try:
             await context.bot.send_message(
@@ -180,10 +238,16 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.warning("Failed to send to %s: %s", uid, e)
 
+
 def schedule_jobs(app: Application):
-    # розсилка щодня о DAILY_HOUR (час Берлін)
-    run_time = datetime.now(BERLIN).replace(hour=DAILY_HOUR, minute=0, second=0, microsecond=0).timetz()
+    run_time = datetime.now(BERLIN).replace(
+        hour=DAILY_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0
+    ).timetz()
     app.job_queue.run_daily(daily_push, time=run_time, name="daily_push_berlin")
+
 
 async def notify_owner_started(app: Application):
     if not OWNER_ID:
@@ -198,6 +262,7 @@ async def notify_owner_started(app: Application):
     except Exception as e:
         log.warning("Owner notify failed: %s", e)
 
+
 # ---------- Entrypoint ----------
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -211,10 +276,11 @@ def main():
     application.add_handler(CallbackQueryHandler(on_button))
 
     schedule_jobs(application)
-    application.post_init = notify_owner_started  # сповіщення власника після старту
+    application.post_init = notify_owner_started
 
     log.info("Bot started. Press Ctrl+C to stop.")
     application.run_polling(close_loop=False)
+
 
 if __name__ == "__main__":
     main()
