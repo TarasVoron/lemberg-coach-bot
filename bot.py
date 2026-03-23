@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
@@ -40,7 +39,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("lemberg-coach-bot")
 
-# Пам’ять для антиповтору "Ще імпульс"
+# Антиповтор для кнопки "Ще імпульс"
 user_last_extra_motivation: dict[int, str] = {}
 
 
@@ -248,7 +247,7 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not query:
+    if not query or not query.message:
         return
 
     await query.answer()
@@ -266,16 +265,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         text = "Невідома дія. Спробуй ще раз."
 
-    try:
-        await query.edit_message_text(
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_kb()
-        )
-    except BadRequest as e:
-        if "Message is not modified" in str(e):
-            return
-        raise
+    await query.message.reply_text(
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_kb()
+    )
 
 
 # ---------- Scheduler ----------
