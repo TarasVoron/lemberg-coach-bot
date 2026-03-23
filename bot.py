@@ -3,7 +3,7 @@ import json
 import random
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -76,18 +76,105 @@ def load_tips() -> list[str]:
     )
 
 
-def load_users() -> set[int]:
+def today_str() -> str:
+    return datetime.now(BERLIN).date().isoformat()
+
+
+def parse_date(value: str) -> date:
+    return date.fromisoformat(value)
+
+
+def load_users_data() -> dict:
     try:
         with open(USERS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return set(data if isinstance(data, list) else [])
+
+        # Міграція зі старого формату: список ID -> словник
+        if isinstance(data, list):
+            result = {}
+            today = today_str()
+            for user_id in data:
+                result[str(user_id)] = {
+                    "streak": 1,
+                    "last_seen": today
+                }
+            return result
+
+        if isinstance(data, dict):
+            return data
+
+        return {}
     except Exception:
-        return set()
+        return {}
 
 
-def save_users(user_ids: set[int]) -> None:
+def save_users_data(data: dict) -> None:
     with open(USERS_PATH, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(user_ids)), f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def ensure_user(user_id: int) -> dict:
+    data = load_users_data()
+    uid = str(user_id)
+
+    if uid not in data:
+        data[uid] = {
+            "streak": 0,
+            "last_seen": ""
+        }
+        save_users_data(data)
+
+    return data
+
+
+def update_user_streak(user_id: int) -> int:
+    data = load_users_data()
+    uid = str(user_id)
+    today = datetime.now(BERLIN).date()
+
+    if uid not in data:
+        data[uid] = {
+            "streak": 1,
+            "last_seen": today.isoformat()
+        }
+        save_users_data(data)
+        return 1
+
+    user = data[uid]
+    last_seen_raw = user.get("last_seen", "")
+    streak = int(user.get("streak", 0))
+
+    if not last_seen_raw:
+        streak = 1
+    else:
+        last_seen = parse_date(last_seen_raw)
+
+        if last_seen == today:
+            # уже заходив сьогодні
+            pass
+        elif last_seen == today - timedelta(days=1):
+            streak += 1
+        else:
+            streak = 1
+
+    user["streak"] = streak
+    user["last_seen"] = today.isoformat()
+    data[uid] = user
+    save_users_data(data)
+    return streak
+
+
+def get_user_streak(user_id: int) -> int:
+    data = load_users_data()
+    uid = str(user_id)
+    if uid not in data:
+        return 0
+    return int(data[uid].get("streak", 0))
+
+
+def get_subscribed_user_ids() -> list[int]:
+    data = load_users_data()
+    return [int(uid) for uid in data.keys()]
 
 
 def get_day_index() -> int:
@@ -159,11 +246,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     chat_id = update.effective_chat.id
-    users = load_users()
-    if chat_id not in users:
-        users.add(chat_id)
-        save_users(users)
-        log.info("New subscriber: %s", chat_id)
+    streak = update_user_streak(chat_id)
+    log.info("User %s started bot. Streak=%s", chat_id, streak)
 
     text = (
         "👋 Привіт! Це <b>Lemberg Coach Bot</b>.\n\n"
@@ -171,6 +255,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• 🧠 <b>Мотивацію дня</b>\n"
         "• 🎯 <b>Завдання дня</b>\n"
         "• 💡 <b>Пораду дня</b>\n\n"
+        f"🔥 <b>Твоя серія:</b> {streak} дн.\n\n"
         "Натисни кнопку нижче."
     )
     await update.effective_message.reply_text(
@@ -191,6 +276,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/subscribe — підписка\n"
         "/unsubscribe — відписка\n"
         "/today — показати весь контент дня\n"
+        "/streak — показати серію днів\n"
         "/help — допомога"
     )
 
@@ -207,12 +293,10 @@ async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.effective_chat or not update.effective_message:
         return
 
-    users = load_users()
-    users.add(update.effective_chat.id)
-    save_users(users)
-
+    streak = update_user_streak(update.effective_chat.id)
     await update.effective_message.reply_text(
-        f"✅ Підписано на щоденні повідомлення о {DAILY_HOUR:02d}:00."
+        f"✅ Підписано на щоденні повідомлення о {DAILY_HOUR:02d}:00.\n"
+        f"🔥 Поточна серія: {streak} дн."
     )
 
 
@@ -220,12 +304,23 @@ async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.effective_chat or not update.effective_message:
         return
 
-    users = load_users()
-    if update.effective_chat.id in users:
-        users.remove(update.effective_chat.id)
-        save_users(users)
+    # Не видаляємо користувача повністю, щоб streak зберігався
+    await update.effective_message.reply_text(
+        "❎ Відписка від авто-повідомлень поки не відокремлена від streak.\n"
+        "Зараз бот просто продовжить працювати як і раніше."
+    )
 
-    await update.effective_message.reply_text("❎ Відписано від щоденних повідомлень.")
+
+async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    streak = get_user_streak(update.effective_chat.id)
+    if streak <= 0:
+        text = "🔥 Серія ще не почалась. Натисни /start і починай ритм."
+    else:
+        text = f"🔥 Твоя поточна серія: <b>{streak} дн.</b>"
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -233,10 +328,13 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     content = today_content()
+    streak = get_user_streak(update.effective_chat.id) if update.effective_chat else 0
+
     text = (
         f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
         f"🎯 <b>Завдання дня</b>\n{content['task']}\n\n"
-        f"💡 <b>Порада дня</b>\n{content['tip']}"
+        f"💡 <b>Порада дня</b>\n{content['tip']}\n\n"
+        f"🔥 <b>Серія:</b> {streak} дн."
     )
     await update.effective_message.reply_text(
         text=text,
@@ -275,7 +373,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------- Scheduler ----------
 async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
     content = today_content()
-    users = load_users()
+    users = get_subscribed_user_ids()
     if not users:
         return
 
@@ -334,6 +432,7 @@ def main() -> None:
     application.add_handler(CommandHandler("subscribe", subscribe_cmd))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe_cmd))
     application.add_handler(CommandHandler("today", today_cmd))
+    application.add_handler(CommandHandler("streak", streak_cmd))
     application.add_handler(CallbackQueryHandler(on_button))
 
     schedule_jobs(application)
