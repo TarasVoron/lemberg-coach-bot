@@ -1,5 +1,6 @@
 import os
 import json
+import random
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -39,6 +40,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("lemberg-coach-bot")
 
+# Пам’ять для антиповтору "Ще імпульс"
+user_last_extra_motivation: dict[int, str] = {}
+
 
 # ---------- Data helpers ----------
 def load_json_list(path: Path, fallback: list[str]) -> list[str]:
@@ -52,15 +56,37 @@ def load_json_list(path: Path, fallback: list[str]) -> list[str]:
     return fallback
 
 
+def load_motivations() -> list[str]:
+    return load_json_list(
+        MOTIVATIONS_PATH,
+        ["Сьогодні твоя сила — просто не зупинятися."]
+    )
+
+
+def load_tasks() -> list[str]:
+    return load_json_list(
+        TASKS_PATH,
+        ["Зроби одну маленьку, але корисну дію для свого майбутнього."]
+    )
+
+
+def load_tips() -> list[str]:
+    return load_json_list(
+        TIPS_PATH,
+        ["Краще маленький прогрес, ніж велике відкладання."]
+    )
+
+
 def load_users() -> set[int]:
     try:
         with open(USERS_PATH, "r", encoding="utf-8") as f:
-            return set(json.load(f))
+            data = json.load(f)
+            return set(data if isinstance(data, list) else [])
     except Exception:
         return set()
 
 
-def save_users(user_ids: set[int]):
+def save_users(user_ids: set[int]) -> None:
     with open(USERS_PATH, "w", encoding="utf-8") as f:
         json.dump(sorted(list(user_ids)), f, ensure_ascii=False, indent=2)
 
@@ -72,30 +98,21 @@ def get_day_index() -> int:
 
 
 def get_today_motivation() -> str:
-    items = load_json_list(
-        MOTIVATIONS_PATH,
-        ["Сьогодні твоя сила — просто не зупинятися."]
-    )
+    items = load_motivations()
     return items[get_day_index() % len(items)]
 
 
 def get_today_task() -> str:
-    items = load_json_list(
-        TASKS_PATH,
-        ["Зроби одну маленьку, але корисну дію для свого майбутнього."]
-    )
+    items = load_tasks()
     return items[get_day_index() % len(items)]
 
 
 def get_today_tip() -> str:
-    items = load_json_list(
-        TIPS_PATH,
-        ["Краще маленький прогрес, ніж велике відкладання."]
-    )
+    items = load_tips()
     return items[get_day_index() % len(items)]
 
 
-def today_content() -> dict:
+def today_content() -> dict[str, str]:
     return {
         "motivation": get_today_motivation(),
         "task": get_today_task(),
@@ -103,12 +120,34 @@ def today_content() -> dict:
     }
 
 
+def get_extra_motivation_for_user(user_id: int) -> str:
+    items = load_motivations()
+    if not items:
+        return "Рухайся вперед."
+
+    if len(items) == 1:
+        result = items[0]
+        user_last_extra_motivation[user_id] = result
+        return result
+
+    last = user_last_extra_motivation.get(user_id)
+    available = [item for item in items if item != last]
+
+    if not available:
+        available = items
+
+    result = random.choice(available)
+    user_last_extra_motivation[user_id] = result
+    return result
+
+
 # ---------- UI builders ----------
-def main_menu_kb():
+def main_menu_kb() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="get_motivation")],
+        [InlineKeyboardButton("✨ Ще імпульс", callback_data="extra_motivation")],
         [InlineKeyboardButton("✅ Завдання дня", callback_data="get_task")],
-        [InlineKeyboardButton("💡 Порада дня", callback_data="get_tip")]
+        [InlineKeyboardButton("💡 Порада дня", callback_data="get_tip")],
     ]
     if MINI_APP_URL:
         buttons.append([InlineKeyboardButton("🧭 Відкрити Mini App", url=MINI_APP_URL)])
@@ -116,7 +155,10 @@ def main_menu_kb():
 
 
 # ---------- Handlers ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
     chat_id = update.effective_chat.id
     users = load_users()
     if chat_id not in users:
@@ -133,13 +175,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Натисни кнопку нижче."
     )
     await update.effective_message.reply_text(
-        text,
+        text=text,
         reply_markup=main_menu_kb(),
         parse_mode=ParseMode.HTML
     )
 
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message:
+        return
+
     await update.effective_message.reply_text(
         "Доступні команди:\n"
         "/start — меню\n"
@@ -151,29 +196,43 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message:
+        return
+
     now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
     await update.effective_message.reply_text(f"✅ Пінг! {now} (Europe/Berlin)")
 
 
-async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
     users = load_users()
     users.add(update.effective_chat.id)
     save_users(users)
+
     await update.effective_message.reply_text(
-        "✅ Підписано на щоденні повідомлення о %02d:00." % DAILY_HOUR
+        f"✅ Підписано на щоденні повідомлення о {DAILY_HOUR:02d}:00."
     )
 
 
-async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def unsubscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
     users = load_users()
     if update.effective_chat.id in users:
         users.remove(update.effective_chat.id)
         save_users(users)
+
     await update.effective_message.reply_text("❎ Відписано від щоденних повідомлень.")
 
 
-async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message:
+        return
+
     content = today_content()
     text = (
         f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
@@ -181,20 +240,25 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💡 <b>Порада дня</b>\n{content['tip']}"
     )
     await update.effective_message.reply_text(
-        text,
+        text=text,
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb()
     )
 
 
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    if not query:
+        return
 
+    await query.answer()
     content = today_content()
 
     if query.data == "get_motivation":
         text = f"🧠 <b>Мотивація дня</b>\n\n{content['motivation']}"
+    elif query.data == "extra_motivation":
+        extra = get_extra_motivation_for_user(query.from_user.id)
+        text = f"✨ <b>Імпульс</b>\n\n{extra}"
     elif query.data == "get_task":
         text = f"🎯 <b>Завдання дня</b>\n\n{content['task']}"
     elif query.data == "get_tip":
@@ -215,7 +279,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------- Scheduler ----------
-async def daily_push(context: ContextTypes.DEFAULT_TYPE):
+async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
     content = today_content()
     users = load_users()
     if not users:
@@ -239,17 +303,20 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE):
             log.warning("Failed to send to %s: %s", uid, e)
 
 
-def schedule_jobs(app: Application):
+def schedule_jobs(app: Application) -> None:
     run_time = datetime.now(BERLIN).replace(
         hour=DAILY_HOUR,
         minute=0,
         second=0,
         microsecond=0
     ).timetz()
+    if app.job_queue is None:
+        log.warning("JobQueue is not available. Daily push was not scheduled.")
+        return
     app.job_queue.run_daily(daily_push, time=run_time, name="daily_push_berlin")
 
 
-async def notify_owner_started(app: Application):
+async def notify_owner_started(app: Application) -> None:
     if not OWNER_ID:
         return
     try:
@@ -264,7 +331,7 @@ async def notify_owner_started(app: Application):
 
 
 # ---------- Entrypoint ----------
-def main():
+def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
