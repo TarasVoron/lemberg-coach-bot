@@ -75,6 +75,42 @@ TG_APP: Application | None = None
 # антиповтор "ще імпульс"
 user_last_extra_motivation: dict[int, str] = {}
 
+# ---------- Coach boundaries ----------
+COACH_KEYWORDS = (
+    "план", "день", "ціль", "цілі", "дисцип", "фокус", "продуктив",
+    "мотивац", "звич", "саморозвит", "прокраст", "відкладан",
+    "рутин", "енергі", "стрес", "втом", "концентрац", "час",
+    "завдан", "пріоритет", "результ", "розклад", "ранок", "вечір",
+    "рішення", "сумнів", "страх", "дія", "коуч", "звички", "працю",
+    "робот", "навчан", "результат", "лінощ", "сила", "звичка"
+)
+
+OFFTOPIC_PATTERNS = (
+    "що це", "what is this", "як цим користуватися", "how to use this",
+    "що на фото", "опиши фото", "переклади", "translate",
+    "скільки коштує", "де купити", "новини", "погода", "курс валют",
+    "who is this", "хто це", "проаналізуй картинку", "аналіз фото",
+    "розкажи про товар", "що зображено"
+)
+
+
+def is_coach_request(text: str) -> bool:
+    low = (text or "").strip().lower()
+
+    if not low:
+        return False
+
+    if any(p in low for p in OFFTOPIC_PATTERNS):
+        return False
+
+    if any(k in low for k in COACH_KEYWORDS):
+        return True
+
+    if len(low.split()) <= 6:
+        return False
+
+    return False
+
 
 # ---------- Data helpers ----------
 def load_json_list(path: Path, fallback: list[str]) -> list[str]:
@@ -133,6 +169,7 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
+                    "menu_message_id": 0,
                 }
             save_users_data(result)
             return result
@@ -147,6 +184,7 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
+                    "menu_message_id": 0,
                 }
                 for k, v in defaults.items():
                     if k not in user:
@@ -178,6 +216,7 @@ def ensure_user(user_id: int) -> dict:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "menu_message_id": 0,
         }
         save_users_data(data)
 
@@ -207,6 +246,7 @@ def set_premium(
             "messages_count": 0,
             "stripe_customer_id": stripe_customer_id,
             "stripe_subscription_id": stripe_subscription_id,
+            "menu_message_id": 0,
         }
     else:
         data[uid]["premium"] = value
@@ -238,6 +278,7 @@ def increment_message_count(user_id: int) -> None:
             "messages_count": 1,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "menu_message_id": 0,
         }
     else:
         data[uid]["messages_count"] = int(data[uid].get("messages_count", 0)) + 1
@@ -258,6 +299,7 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "menu_message_id": 0,
         }
         save_users_data(data)
         return 1, False
@@ -297,6 +339,32 @@ def get_user_streak(user_id: int) -> int:
 def get_subscribed_user_ids() -> list[int]:
     data = load_users_data()
     return [int(uid) for uid in data.keys()]
+
+
+def get_menu_message_id(user_id: int) -> int:
+    data = load_users_data()
+    uid = str(user_id)
+    return int(data.get(uid, {}).get("menu_message_id", 0) or 0)
+
+
+def set_menu_message_id(user_id: int, message_id: int) -> None:
+    data = load_users_data()
+    uid = str(user_id)
+
+    if uid not in data:
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+            "menu_message_id": message_id,
+        }
+    else:
+        data[uid]["menu_message_id"] = message_id
+
+    save_users_data(data)
 
 
 def get_day_index() -> int:
@@ -476,6 +544,18 @@ def premium_kb(checkout_url: str | None = None, is_active: bool = False) -> Inli
 
 # ---------- GPT ----------
 def ask_gpt(user_text: str) -> str:
+    if not is_coach_request(user_text):
+        return (
+            "Я тут не як універсальний ChatGPT.\n\n"
+            "Я працюю як коуч для:\n"
+            "• дисципліни\n"
+            "• фокусу\n"
+            "• планування дня\n"
+            "• звичок\n"
+            "• особистого прогресу\n\n"
+            "Опиши словами свою ціль, проблему або день, який хочеш зібрати — і я допоможу."
+        )
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -488,7 +568,10 @@ def ask_gpt(user_text: str) -> str:
                         "Ти персональний AI-коуч Lemberg Coach. "
                         "Відповідай українською. "
                         "Звертайся до користувача на 'ти'. "
-                        "Тон: сильний, зібраний, впевнений, підтримуючий. "
+                        "Ти НЕ універсальний ChatGPT. "
+                        "Ти працюєш тільки як коуч з дисципліни, фокусу, продуктивності, "
+                        "звичок, планування дня, особистого прогресу та прийняття рішень. "
+                        "Якщо запит виходить за ці межі — коротко поверни розмову в коучинг. "
                         "Будь коротким, конкретним і корисним. "
                         "Не пиши довгі есе. "
                         "Якщо доречно, використовуй формат:\n"
@@ -543,18 +626,35 @@ def stripe_attr(obj, key: str, default=None):
 
 
 # ---------- Telegram helpers ----------
-async def safe_edit_menu(query, text: str, reply_markup=None):
-    try:
-        await query.message.edit_text(
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup,
-        )
-    except Exception as e:
-        err = str(e).lower()
-        if "message is not modified" in err:
+async def send_or_update_panel(chat_id: int, text: str, reply_markup=None):
+    if TG_APP is None:
+        return
+
+    message_id = get_menu_message_id(chat_id)
+
+    if message_id:
+        try:
+            await TG_APP.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+            )
             return
-        log.warning("Menu edit failed: %s", e)
+        except Exception as e:
+            err = str(e).lower()
+            if "message is not modified" in err:
+                return
+            log.warning("Panel edit failed for %s: %s", chat_id, e)
+
+    msg = await TG_APP.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+    )
+    set_menu_message_id(chat_id, msg.message_id)
 
 
 async def send_premium_activated_message(user_id: int):
@@ -571,24 +671,33 @@ async def send_premium_activated_message(user_id: int):
             chat_id=user_id,
             text=text,
             parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_kb(),
         )
     except Exception as e:
         log.warning("Failed to send premium activation message to %s: %s", user_id, e)
 
+    try:
+        await send_or_update_panel(
+            user_id,
+            build_main_menu_text(user_id),
+            reply_markup=main_menu_kb(),
+        )
+    except Exception as e:
+        log.warning("Failed to refresh main panel after premium activation: %s", e)
+
 
 # ---------- Telegram handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat or not update.effective_message:
+    if not update.effective_chat:
         return
 
     chat_id = update.effective_chat.id
     streak, lost = update_user_streak(chat_id)
+    ensure_user(chat_id)
 
-    await update.effective_message.reply_text(
-        text=build_main_menu_text(chat_id, include_comeback=lost),
+    await send_or_update_panel(
+        chat_id,
+        build_main_menu_text(chat_id, include_comeback=lost),
         reply_markup=main_menu_kb(),
-        parse_mode=ParseMode.HTML,
     )
 
 
@@ -656,9 +765,9 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
 
     if is_premium(chat_id):
-        await update.effective_message.reply_text(
+        await send_or_update_panel(
+            chat_id,
             build_premium_text(chat_id),
-            parse_mode=ParseMode.HTML,
             reply_markup=premium_kb(is_active=True),
         )
         return
@@ -672,9 +781,9 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await update.effective_message.reply_text(
+    await send_or_update_panel(
+        chat_id,
         build_premium_text(chat_id),
-        parse_mode=ParseMode.HTML,
         reply_markup=premium_kb(checkout_url=checkout_url),
     )
 
@@ -688,40 +797,40 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = query.from_user.id
 
     if query.data == "back_menu":
-        await safe_edit_menu(
-            query,
+        await send_or_update_panel(
+            user_id,
             build_main_menu_text(user_id),
             reply_markup=main_menu_kb(),
         )
         return
 
     if query.data == "get_motivation":
-        await safe_edit_menu(
-            query,
+        await send_or_update_panel(
+            user_id,
             build_motivation_text(),
             reply_markup=back_menu_kb(),
         )
         return
 
     if query.data == "extra_motivation":
-        await safe_edit_menu(
-            query,
+        await send_or_update_panel(
+            user_id,
             build_extra_text(user_id),
             reply_markup=back_menu_kb(),
         )
         return
 
     if query.data == "get_task":
-        await safe_edit_menu(
-            query,
+        await send_or_update_panel(
+            user_id,
             build_task_text(),
             reply_markup=back_menu_kb(),
         )
         return
 
     if query.data == "get_tip":
-        await safe_edit_menu(
-            query,
+        await send_or_update_panel(
+            user_id,
             build_tip_text(),
             reply_markup=back_menu_kb(),
         )
@@ -729,8 +838,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if query.data == "upgrade":
         if is_premium(user_id):
-            await safe_edit_menu(
-                query,
+            await send_or_update_panel(
+                user_id,
                 build_premium_text(user_id),
                 reply_markup=premium_kb(is_active=True),
             )
@@ -740,24 +849,34 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             checkout_url = create_checkout_session(user_id)
         except Exception as e:
             log.warning("Stripe checkout session error: %s", e)
-            await safe_edit_menu(
-                query,
+            await send_or_update_panel(
+                user_id,
                 "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
                 reply_markup=back_menu_kb(),
             )
             return
 
-        await safe_edit_menu(
-            query,
+        await send_or_update_panel(
+            user_id,
             build_premium_text(user_id),
             reply_markup=premium_kb(checkout_url=checkout_url),
         )
         return
 
-    await safe_edit_menu(
-        query,
+    await send_or_update_panel(
+        user_id,
         "Невідома дія. Спробуй ще раз.",
         reply_markup=main_menu_kb(),
+    )
+
+
+async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message:
+        return
+
+    await update.effective_message.reply_text(
+        "📷 Я поки не аналізую фото в цьому боті.\n\n"
+        "Опиши словами свою ситуацію, ціль або проблему — і я допоможу як коуч."
     )
 
 
@@ -923,49 +1042,4 @@ def stripe_webhook():
         tg_user_id = find_user_id_by_subscription(subscription_id)
         if tg_user_id:
             set_premium(tg_user_id, False)
-            log.info("Premium disabled for Telegram user %s (subscription deleted)", tg_user_id)
-
-    elif event_type == "customer.subscription.updated":
-        subscription_id = str(stripe_attr(obj, "id", "") or "")
-        status = str(stripe_attr(obj, "status", "") or "")
-        tg_user_id = find_user_id_by_subscription(subscription_id)
-
-        if tg_user_id and status not in ("active", "trialing"):
-            set_premium(tg_user_id, False)
-            log.info("Premium disabled for Telegram user %s (status=%s)", tg_user_id, status)
-
-    return "ok", 200
-
-
-def run_web_server() -> None:
-    app_flask.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
-
-
-# ---------- Main ----------
-def main() -> None:
-    global TG_APP
-
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-
-    application = Application.builder().token(BOT_TOKEN).build()
-    TG_APP = application
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("ping", ping_cmd))
-    application.add_handler(CommandHandler("today", today_cmd))
-    application.add_handler(CommandHandler("streak", streak_cmd))
-    application.add_handler(CommandHandler("upgrade", upgrade_cmd))
-    application.add_handler(CallbackQueryHandler(on_button))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_with_coach))
-
-    schedule_jobs(application)
-    application.post_init = notify_owner_started
-
-    log.info("Bot started. Press Ctrl+C to stop.")
-    application.run_polling(close_loop=False)
-
-
-if __name__ == "__main__":
-    main()
+            log.info("Premium
