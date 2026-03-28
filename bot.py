@@ -72,24 +72,29 @@ stripe.api_key = STRIPE_SECRET_KEY
 app_flask = Flask(__name__)
 TG_APP: Application | None = None
 
-# антиповтор "ще імпульс"
+# антидубль імпульсу
 user_last_extra_motivation: dict[int, str] = {}
 
-# ---------- Coach request filters ----------
+# ---------- Scope / coach filters ----------
 COACH_KEYWORDS = (
     "план", "день", "ціль", "цілі", "дисцип", "фокус", "продуктив",
     "мотивац", "звич", "саморозвит", "прокраст", "відкладан",
     "рутин", "енергі", "стрес", "втом", "концентрац", "час",
     "завдан", "пріоритет", "результ", "розклад", "ранок", "вечір",
     "рішення", "сумнів", "страх", "дія", "коуч", "звички",
-    "вигоран", "прогрес", "цілеспрям", "успіх", "поштовх"
+    "вигоран", "прогрес", "цілеспрям", "успіх", "поштовх",
+    "habit", "focus", "discipline", "productivity", "routine",
+    "goal", "goals", "plan", "day plan", "motivation", "progress",
+    "entscheidung", "fokus", "disziplin", "ziel", "ziele", "planen",
+    "gewohnheit", "produktiv", "routine", "fortschritt"
 )
 
 OFFTOPIC_PATTERNS = (
     "що це", "what is this", "як цим користуватися", "how to use this",
     "що на фото", "опиши фото", "переклади", "translate",
     "скільки коштує", "де купити", "новини", "погода", "курс валют",
-    "who is this", "хто це"
+    "who is this", "хто це", "news", "weather", "price",
+    "wie viel kostet", "wetter", "nachrichten"
 )
 
 # ---------- Data helpers ----------
@@ -149,6 +154,8 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
+                    "menu_message_id": 0,
+                    "lang": "uk",
                 }
             save_users_data(result)
             return result
@@ -163,6 +170,8 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
+                    "menu_message_id": 0,
+                    "lang": "uk",
                 }
                 for k, v in defaults.items():
                     if k not in user:
@@ -194,16 +203,58 @@ def ensure_user(user_id: int) -> dict:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "menu_message_id": 0,
+            "lang": "uk",
         }
         save_users_data(data)
 
     return data[uid]
 
 
-def is_premium(user_id: int) -> bool:
+def get_user(user_id: int) -> dict:
+    ensure_user(user_id)
+    data = load_users_data()
+    return data[str(user_id)]
+
+
+def update_user_field(user_id: int, key: str, value) -> None:
     data = load_users_data()
     uid = str(user_id)
-    return bool(data.get(uid, {}).get("premium", False))
+    if uid not in data:
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+            "menu_message_id": 0,
+            "lang": "uk",
+        }
+    data[uid][key] = value
+    save_users_data(data)
+
+
+def get_menu_message_id(user_id: int) -> int:
+    return int(get_user(user_id).get("menu_message_id", 0) or 0)
+
+
+def set_menu_message_id(user_id: int, message_id: int) -> None:
+    update_user_field(user_id, "menu_message_id", int(message_id))
+
+
+def get_user_lang(user_id: int) -> str:
+    return str(get_user(user_id).get("lang", "uk"))
+
+
+def set_user_lang(user_id: int, lang: str) -> None:
+    if lang not in ("uk", "en", "de"):
+        return
+    update_user_field(user_id, "lang", lang)
+
+
+def is_premium(user_id: int) -> bool:
+    return bool(get_user(user_id).get("premium", False))
 
 
 def set_premium(
@@ -223,6 +274,8 @@ def set_premium(
             "messages_count": 0,
             "stripe_customer_id": stripe_customer_id,
             "stripe_subscription_id": stripe_subscription_id,
+            "menu_message_id": 0,
+            "lang": "uk",
         }
     else:
         data[uid]["premium"] = value
@@ -254,6 +307,8 @@ def increment_message_count(user_id: int) -> None:
             "messages_count": 1,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "menu_message_id": 0,
+            "lang": "uk",
         }
     else:
         data[uid]["messages_count"] = int(data[uid].get("messages_count", 0)) + 1
@@ -274,6 +329,8 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "menu_message_id": 0,
+            "lang": "uk",
         }
         save_users_data(data)
         return 1, False
@@ -303,11 +360,7 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
 
 
 def get_user_streak(user_id: int) -> int:
-    data = load_users_data()
-    uid = str(user_id)
-    if uid not in data:
-        return 0
-    return int(data[uid].get("streak", 0))
+    return int(get_user(user_id).get("streak", 0))
 
 
 def get_subscribed_user_ids() -> list[int]:
@@ -364,8 +417,181 @@ def get_extra_motivation_for_user(user_id: int) -> str:
     return result
 
 
+# ---------- i18n ----------
+TEXTS = {
+    "uk": {
+        "coach_scope_reply": (
+            "Я тут не як універсальний ChatGPT.\n\n"
+            "Я працюю як коуч для:\n"
+            "• дисципліни\n"
+            "• фокусу\n"
+            "• планування дня\n"
+            "• звичок\n"
+            "• особистого прогресу\n\n"
+            "Опиши словами свою ціль, проблему або день, який хочеш зібрати — і я допоможу."
+        ),
+        "photo_reply": (
+            "📷 Я поки не аналізую фото в цьому боті.\n\n"
+            "Опиши словами свою ситуацію, ціль або проблему — і я допоможу як коуч."
+        ),
+        "premium_locked": (
+            "🔒 GPT-коуч доступний тільки в Premium.\n\n"
+            "Натисни /upgrade, щоб відкрити доступ."
+        ),
+        "payment_error": "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
+        "gpt_error": "⚠️ GPT тимчасово недоступний. Спробуй ще раз трохи пізніше.",
+        "premium_activated": (
+            "🎉 <b>Вітаємо! Premium активовано.</b>\n\n"
+            "Тепер тобі доступний GPT-коуч 24/7.\n"
+            "Просто напиши мені повідомлення — і я відповім."
+        ),
+        "back_to_menu": "⬅️ Назад у меню",
+        "get_motivation": "🔥 Отримати мотивацію",
+        "extra_push": "✨ Ще імпульс",
+        "task_day": "✅ Завдання дня",
+        "tip_day": "💡 Порада дня",
+        "premium_btn": "🚀 Premium",
+        "change_lang": "🌍 Мова",
+        "open_mini_app": "🧭 Відкрити Mini App",
+        "buy_premium": "💳 Оформити Premium",
+        "language_title": (
+            "🌍 <b>Обери мову</b>\n\n"
+            "Зараз доступні:\n"
+            "• Українська\n"
+            "• English\n"
+            "• Deutsch"
+        ),
+    },
+    "en": {
+        "coach_scope_reply": (
+            "I’m not here as a universal ChatGPT.\n\n"
+            "I work as a coach for:\n"
+            "• discipline\n"
+            "• focus\n"
+            "• day planning\n"
+            "• habits\n"
+            "• personal progress\n\n"
+            "Describe your goal, problem, or the day you want to organize — and I’ll help."
+        ),
+        "photo_reply": (
+            "📷 I don’t analyze photos in this bot yet.\n\n"
+            "Describe your situation, goal, or problem in words — and I’ll help as a coach."
+        ),
+        "premium_locked": (
+            "🔒 GPT coach is available only in Premium.\n\n"
+            "Tap /upgrade to unlock access."
+        ),
+        "payment_error": "⚠️ Could not create the payment page. Please try again later.",
+        "gpt_error": "⚠️ GPT is temporarily unavailable. Please try again a bit later.",
+        "premium_activated": (
+            "🎉 <b>Congrats! Premium is activated.</b>\n\n"
+            "GPT coach 24/7 is now available.\n"
+            "Just send me a message — and I’ll reply."
+        ),
+        "back_to_menu": "⬅️ Back to menu",
+        "get_motivation": "🔥 Get motivation",
+        "extra_push": "✨ Extra push",
+        "task_day": "✅ Task of the day",
+        "tip_day": "💡 Tip of the day",
+        "premium_btn": "🚀 Premium",
+        "change_lang": "🌍 Language",
+        "open_mini_app": "🧭 Open Mini App",
+        "buy_premium": "💳 Get Premium",
+        "language_title": (
+            "🌍 <b>Choose a language</b>\n\n"
+            "Available now:\n"
+            "• Українська\n"
+            "• English\n"
+            "• Deutsch"
+        ),
+    },
+    "de": {
+        "coach_scope_reply": (
+            "Ich bin hier nicht als universelles ChatGPT.\n\n"
+            "Ich arbeite als Coach für:\n"
+            "• Disziplin\n"
+            "• Fokus\n"
+            "• Tagesplanung\n"
+            "• Gewohnheiten\n"
+            "• persönlichen Fortschritt\n\n"
+            "Beschreibe dein Ziel, Problem oder deinen Tag — und ich helfe dir."
+        ),
+        "photo_reply": (
+            "📷 Ich analysiere in diesem Bot noch keine Fotos.\n\n"
+            "Beschreibe dein Ziel, deine Situation oder dein Problem in Worten — und ich helfe dir als Coach."
+        ),
+        "premium_locked": (
+            "🔒 Der GPT-Coach ist nur in Premium verfügbar.\n\n"
+            "Tippe /upgrade, um den Zugang freizuschalten."
+        ),
+        "payment_error": "⚠️ Die Zahlungsseite konnte nicht erstellt werden. Bitte versuche es später erneut.",
+        "gpt_error": "⚠️ GPT ist vorübergehend nicht verfügbar. Bitte versuche es später erneut.",
+        "premium_activated": (
+            "🎉 <b>Glückwunsch! Premium ist aktiviert.</b>\n\n"
+            "Der GPT-Coach 24/7 ist jetzt verfügbar.\n"
+            "Schreib mir einfach eine Nachricht — ich antworte."
+        ),
+        "back_to_menu": "⬅️ Zurück zum Menü",
+        "get_motivation": "🔥 Motivation",
+        "extra_push": "✨ Extra Impuls",
+        "task_day": "✅ Tagesaufgabe",
+        "tip_day": "💡 Tipp des Tages",
+        "premium_btn": "🚀 Premium",
+        "change_lang": "🌍 Sprache",
+        "open_mini_app": "🧭 Mini App öffnen",
+        "buy_premium": "💳 Premium holen",
+        "language_title": (
+            "🌍 <b>Sprache wählen</b>\n\n"
+            "Jetzt verfügbar:\n"
+            "• Українська\n"
+            "• English\n"
+            "• Deutsch"
+        ),
+    },
+}
+
+
+def t(user_id: int, key: str) -> str:
+    lang = get_user_lang(user_id)
+    return TEXTS.get(lang, TEXTS["uk"]).get(key, TEXTS["uk"].get(key, key))
+
+
 # ---------- Streak messaging ----------
-def get_streak_message(streak: int) -> str:
+def get_streak_message(streak: int, lang: str = "uk") -> str:
+    if lang == "en":
+        if streak >= 21:
+            return "🔥 21 days — you are already becoming a different person."
+        elif streak >= 14:
+            return "⚡ 14 days — this is already a system, not an accident."
+        elif streak >= 10:
+            return "💥 10 days — your old habits are already under pressure."
+        elif streak >= 7:
+            return "🚀 7 days — you’re building a new version of yourself."
+        elif streak >= 5:
+            return "📈 5 days — discipline is starting to work."
+        elif streak >= 3:
+            return "🔥 3 days — you’re already in rhythm."
+        elif streak >= 1:
+            return "✨ Starting is already more than most people do."
+        return ""
+
+    if lang == "de":
+        if streak >= 21:
+            return "🔥 21 Tage — du wirst bereits zu einer neuen Version von dir."
+        elif streak >= 14:
+            return "⚡ 14 Tage — das ist schon ein System, kein Zufall."
+        elif streak >= 10:
+            return "💥 10 Tage — deine alten Gewohnheiten geraten unter Druck."
+        elif streak >= 7:
+            return "🚀 7 Tage — du baust eine neue Version von dir auf."
+        elif streak >= 5:
+            return "📈 5 Tage — Disziplin beginnt zu wirken."
+        elif streak >= 3:
+            return "🔥 3 Tage — du bist schon im Rhythmus."
+        elif streak >= 1:
+            return "✨ Anfangen ist bereits mehr als die meisten tun."
+        return ""
+
     if streak >= 21:
         return "🔥 21 день — ти вже інша людина."
     elif streak >= 14:
@@ -383,7 +609,19 @@ def get_streak_message(streak: int) -> str:
     return ""
 
 
-def get_comeback_message() -> str:
+def get_comeback_message(lang: str = "uk") -> str:
+    if lang == "en":
+        return (
+            "⚠️ You fell out of rhythm.\n\n"
+            "But coming back is stronger than never falling.\n\n"
+            "Today = a new start."
+        )
+    if lang == "de":
+        return (
+            "⚠️ Du bist aus dem Rhythmus gefallen.\n\n"
+            "Aber zurückzukommen ist stärker, als nie zu fallen.\n\n"
+            "Heute = ein neuer Start."
+        )
     return (
         "⚠️ Ти випав з ритму.\n\n"
         "Але повернутись — це сильніше, ніж не падати.\n\n"
@@ -393,11 +631,49 @@ def get_comeback_message() -> str:
 
 # ---------- UI texts ----------
 def build_main_menu_text(user_id: int, include_comeback: bool = False) -> str:
+    lang = get_user_lang(user_id)
     streak = get_user_streak(user_id)
-    streak_msg = get_streak_message(streak)
-    premium_badge = "💎 <b>Premium активний</b>\n\n" if is_premium(user_id) else ""
-    extra = get_comeback_message() + "\n\n" if include_comeback else ""
+    streak_msg = get_streak_message(streak, lang=lang)
+    premium_badge = ""
 
+    if lang == "en":
+        premium_badge = "💎 <b>Premium active</b>\n\n" if is_premium(user_id) else ""
+        extra = get_comeback_message(lang) + "\n\n" if include_comeback else ""
+        return (
+            extra
+            + premium_badge
+            + "👋 <b>Lemberg Coach</b>\n\n"
+            + "Your AI coach for discipline, focus, and real action.\n\n"
+            + "Every day you get:\n"
+            + "• 🧠 <b>Motivation of the day</b>\n"
+            + "• ✅ <b>Task of the day</b>\n"
+            + "• 💡 <b>Tip of the day</b>\n"
+            + "• ✨ <b>Extra push</b>\n\n"
+            + f"🔥 <b>Your streak:</b> {streak} day(s)\n"
+            + f"{streak_msg}\n\n"
+            + "Choose an action below or send me a message."
+        )
+
+    if lang == "de":
+        premium_badge = "💎 <b>Premium aktiv</b>\n\n" if is_premium(user_id) else ""
+        extra = get_comeback_message(lang) + "\n\n" if include_comeback else ""
+        return (
+            extra
+            + premium_badge
+            + "👋 <b>Lemberg Coach</b>\n\n"
+            + "Dein AI-Coach für Disziplin, Fokus und echte Handlung.\n\n"
+            + "Jeden Tag bekommst du:\n"
+            + "• 🧠 <b>Motivation des Tages</b>\n"
+            + "• ✅ <b>Tagesaufgabe</b>\n"
+            + "• 💡 <b>Tipp des Tages</b>\n"
+            + "• ✨ <b>Impuls</b>\n\n"
+            + f"🔥 <b>Deine Serie:</b> {streak} Tag(e)\n"
+            + f"{streak_msg}\n\n"
+            + "Wähle unten eine Aktion oder schreibe mir eine Nachricht."
+        )
+
+    premium_badge = "💎 <b>Premium активний</b>\n\n" if is_premium(user_id) else ""
+    extra = get_comeback_message(lang) + "\n\n" if include_comeback else ""
     return (
         extra
         + premium_badge
@@ -415,38 +691,98 @@ def build_main_menu_text(user_id: int, include_comeback: bool = False) -> str:
 
 
 def build_motivation_text(user_id: int) -> str:
-    return (
-        "🧠 <b>Мотивація дня</b>\n\n"
-        f"{get_today_motivation()}\n\n"
-        "Натисни «Назад у меню», щоб повернутись."
-    )
+    lang = get_user_lang(user_id)
+    body = get_today_motivation()
+    if lang == "en":
+        return f"🧠 <b>Motivation of the day</b>\n\n{body}"
+    if lang == "de":
+        return f"🧠 <b>Motivation des Tages</b>\n\n{body}"
+    return f"🧠 <b>Мотивація дня</b>\n\n{body}"
 
 
 def build_extra_text(user_id: int) -> str:
-    return (
-        "✨ <b>Імпульс</b>\n\n"
-        f"{get_extra_motivation_for_user(user_id)}\n\n"
-        "Натисни «Назад у меню», щоб повернутись."
-    )
+    lang = get_user_lang(user_id)
+    body = get_extra_motivation_for_user(user_id)
+    if lang == "en":
+        return f"✨ <b>Extra push</b>\n\n{body}"
+    if lang == "de":
+        return f"✨ <b>Impuls</b>\n\n{body}"
+    return f"✨ <b>Імпульс</b>\n\n{body}"
 
 
 def build_task_text(user_id: int) -> str:
-    return (
-        "✅ <b>Завдання дня</b>\n\n"
-        f"{get_today_task()}\n\n"
-        "Натисни «Назад у меню», щоб повернутись."
-    )
+    lang = get_user_lang(user_id)
+    body = get_today_task()
+    if lang == "en":
+        return f"✅ <b>Task of the day</b>\n\n{body}"
+    if lang == "de":
+        return f"✅ <b>Tagesaufgabe</b>\n\n{body}"
+    return f"✅ <b>Завдання дня</b>\n\n{body}"
 
 
 def build_tip_text(user_id: int) -> str:
-    return (
-        "💡 <b>Порада дня</b>\n\n"
-        f"{get_today_tip()}\n\n"
-        "Натисни «Назад у меню», щоб повернутись."
-    )
+    lang = get_user_lang(user_id)
+    body = get_today_tip()
+    if lang == "en":
+        return f"💡 <b>Tip of the day</b>\n\n{body}"
+    if lang == "de":
+        return f"💡 <b>Tipp des Tages</b>\n\n{body}"
+    return f"💡 <b>Порада дня</b>\n\n{body}"
 
 
 def build_premium_text(user_id: int) -> str:
+    lang = get_user_lang(user_id)
+
+    if lang == "en":
+        if is_premium(user_id):
+            return (
+                "💎 <b>Lemberg Coach Premium</b>\n\n"
+                "Your Premium is already active.\n\n"
+                "What is unlocked now:\n"
+                "• GPT coach 24/7\n"
+                "• personal replies for your situation\n"
+                "• fast access without repeat payment\n\n"
+                "Just send me a message — and I’ll reply."
+            )
+        return (
+            "🚀 <b>Lemberg Coach Premium</b>\n\n"
+            "This is your personal AI coach that helps you:\n"
+            "• stop wasting the day\n"
+            "• keep focus\n"
+            "• make decisions faster\n"
+            "• move without chaos\n\n"
+            "<b>What unlocks:</b>\n"
+            "• GPT coach 24/7\n"
+            "• personal replies for your goals\n"
+            "• future premium features\n\n"
+            "Tap the button below for secure payment."
+        )
+
+    if lang == "de":
+        if is_premium(user_id):
+            return (
+                "💎 <b>Lemberg Coach Premium</b>\n\n"
+                "Dein Premium ist bereits aktiv.\n\n"
+                "Jetzt freigeschaltet:\n"
+                "• GPT-Coach 24/7\n"
+                "• persönliche Antworten für deine Situation\n"
+                "• schneller Zugriff ohne erneute Zahlung\n\n"
+                "Schreib mir einfach — ich antworte."
+            )
+        return (
+            "🚀 <b>Lemberg Coach Premium</b>\n\n"
+            "Das ist dein persönlicher AI-Coach, der dir hilft:\n"
+            "• den Tag nicht zu verlieren\n"
+            "• den Fokus zu halten\n"
+            "• schneller Entscheidungen zu treffen\n"
+            "• ohne Chaos voranzukommen\n\n"
+            "<b>Was freigeschaltet wird:</b>\n"
+            "• GPT-Coach 24/7\n"
+            "• persönliche Antworten auf deine Ziele\n"
+            "• zukünftige Premium-Funktionen\n\n"
+            "Tippe unten für eine sichere Zahlung."
+        )
+
     if is_premium(user_id):
         return (
             "💎 <b>Lemberg Coach Premium</b>\n\n"
@@ -474,46 +810,79 @@ def build_premium_text(user_id: int) -> str:
 
 
 def build_today_text(user_id: int) -> str:
+    lang = get_user_lang(user_id)
     content = today_content()
     streak = get_user_streak(user_id)
+    streak_text = get_streak_message(streak, lang=lang)
+
+    if lang == "en":
+        return (
+            f"🧠 <b>Motivation of the day</b>\n{content['motivation']}\n\n"
+            f"✅ <b>Task of the day</b>\n{content['task']}\n\n"
+            f"💡 <b>Tip of the day</b>\n{content['tip']}\n\n"
+            f"🔥 <b>Your streak:</b> {streak} day(s)\n"
+            f"{streak_text}"
+        )
+
+    if lang == "de":
+        return (
+            f"🧠 <b>Motivation des Tages</b>\n{content['motivation']}\n\n"
+            f"✅ <b>Tagesaufgabe</b>\n{content['task']}\n\n"
+            f"💡 <b>Tipp des Tages</b>\n{content['tip']}\n\n"
+            f"🔥 <b>Deine Serie:</b> {streak} Tag(e)\n"
+            f"{streak_text}"
+        )
+
     return (
         f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
         f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
         f"💡 <b>Порада дня</b>\n{content['tip']}\n\n"
         f"🔥 <b>Серія:</b> {streak} дн.\n"
-        f"{get_streak_message(streak)}"
+        f"{streak_text}"
     )
 
 
 # ---------- Keyboards ----------
-def main_menu_kb() -> InlineKeyboardMarkup:
+def main_menu_kb(user_id: int) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="get_motivation")],
-        [InlineKeyboardButton("✨ Ще імпульс", callback_data="extra_motivation")],
-        [InlineKeyboardButton("✅ Завдання дня", callback_data="get_task")],
-        [InlineKeyboardButton("💡 Порада дня", callback_data="get_tip")],
-        [InlineKeyboardButton("🚀 Premium", callback_data="upgrade")],
+        [InlineKeyboardButton(t(user_id, "get_motivation"), callback_data="get_motivation")],
+        [InlineKeyboardButton(t(user_id, "extra_push"), callback_data="extra_motivation")],
+        [InlineKeyboardButton(t(user_id, "task_day"), callback_data="get_task")],
+        [InlineKeyboardButton(t(user_id, "tip_day"), callback_data="get_tip")],
+        [InlineKeyboardButton(t(user_id, "premium_btn"), callback_data="upgrade")],
+        [InlineKeyboardButton(t(user_id, "change_lang"), callback_data="change_lang")],
     ]
     if MINI_APP_URL:
-        buttons.append([InlineKeyboardButton("🧭 Відкрити Mini App", url=MINI_APP_URL)])
+        buttons.append([InlineKeyboardButton(t(user_id, "open_mini_app"), url=MINI_APP_URL)])
     return InlineKeyboardMarkup(buttons)
 
 
-def back_menu_kb() -> InlineKeyboardMarkup:
+def back_menu_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")]]
+        [[InlineKeyboardButton(t(user_id, "back_to_menu"), callback_data="back_menu")]]
     )
 
 
-def premium_kb(checkout_url: str | None = None, is_active: bool = False) -> InlineKeyboardMarkup:
+def premium_kb(user_id: int, checkout_url: str | None = None, is_active: bool = False) -> InlineKeyboardMarkup:
     if is_active:
-        return back_menu_kb()
+        return back_menu_kb(user_id)
 
     buttons = []
     if checkout_url:
-        buttons.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
-    buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
+        buttons.append([InlineKeyboardButton(t(user_id, "buy_premium"), url=checkout_url)])
+    buttons.append([InlineKeyboardButton(t(user_id, "back_to_menu"), callback_data="back_menu")])
     return InlineKeyboardMarkup(buttons)
+
+
+def language_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🇺🇦 Українська", callback_data="lang_uk")],
+            [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
+            [InlineKeyboardButton("🇩🇪 Deutsch", callback_data="lang_de")],
+            [InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")],
+        ]
+    )
 
 
 # ---------- Request scope ----------
@@ -536,18 +905,17 @@ def is_coach_request(text: str) -> bool:
 
 
 # ---------- GPT ----------
-def ask_gpt(user_text: str) -> str:
+def ask_gpt(user_id: int, user_text: str) -> str:
+    lang = get_user_lang(user_id)
+
     if not is_coach_request(user_text):
-        return (
-            "Я тут не як універсальний ChatGPT.\n\n"
-            "Я працюю як коуч для:\n"
-            "• дисципліни\n"
-            "• фокусу\n"
-            "• планування дня\n"
-            "• звичок\n"
-            "• особистого прогресу\n\n"
-            "Опиши словами свою ціль, проблему або день, який хочеш зібрати — і я допоможу."
-        )
+        return t(user_id, "coach_scope_reply")
+
+    language_hint = {
+        "uk": "Відповідай українською.",
+        "en": "Reply in English.",
+        "de": "Antworte auf Deutsch.",
+    }.get(lang, "Відповідай українською.")
 
     try:
         response = client.chat.completions.create(
@@ -559,8 +927,8 @@ def ask_gpt(user_text: str) -> str:
                     "role": "system",
                     "content": (
                         "Ти персональний AI-коуч Lemberg Coach. "
-                        "Відповідай українською. "
-                        "Звертайся до користувача на 'ти'. "
+                        f"{language_hint} "
+                        "Звертайся до користувача на 'ти' або природно для вибраної мови. "
                         "Ти НЕ універсальний ChatGPT. "
                         "Ти працюєш тільки як коуч з дисципліни, фокусу, продуктивності, "
                         "звичок, планування дня, особистого прогресу та прийняття рішень. "
@@ -580,7 +948,7 @@ def ask_gpt(user_text: str) -> str:
         return response.choices[0].message.content or "Не зупиняйся."
     except Exception as e:
         log.warning("OpenAI error: %s", e)
-        return "⚠️ GPT тимчасово недоступний. Спробуй ще раз трохи пізніше."
+        return t(user_id, "gpt_error")
 
 
 # ---------- Stripe checkout ----------
@@ -618,33 +986,81 @@ def stripe_attr(obj, key: str, default=None):
         return default
 
 
-# ---------- Panel editors ----------
-async def edit_panel_message(message, text: str, reply_markup):
+# ---------- Panel logic ----------
+async def remove_keyboard(chat_id: int, message_id: int) -> None:
+    if TG_APP is None or not message_id:
+        return
+    try:
+        await TG_APP.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=None,
+        )
+    except Exception as e:
+        log.warning("Failed to remove keyboard from old panel %s/%s: %s", chat_id, message_id, e)
+
+
+async def send_main_panel(chat_id: int, text: str, reply_markup) -> int:
+    if TG_APP is None:
+        return 0
+
+    msg = await TG_APP.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+    )
+    return msg.message_id
+
+
+async def open_fresh_main_panel(chat_id: int, include_comeback: bool = False) -> None:
+    old_id = get_menu_message_id(chat_id)
+    if old_id:
+        await remove_keyboard(chat_id, old_id)
+
+    new_id = await send_main_panel(
+        chat_id,
+        build_main_menu_text(chat_id, include_comeback=include_comeback),
+        main_menu_kb(chat_id),
+    )
+    if new_id:
+        set_menu_message_id(chat_id, new_id)
+
+
+async def edit_active_panel_or_recreate(chat_id: int, message, text: str, reply_markup) -> None:
+    current_menu_id = get_menu_message_id(chat_id)
+    clicked_message_id = message.message_id
+
+    # Якщо тиснуть стару панель — знімаємо з неї кнопки і працюємо з актуальною
+    if current_menu_id and clicked_message_id != current_menu_id:
+        try:
+            await message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            log.warning("Failed to clear stale panel keyboard: %s", e)
+        return
+
     try:
         await message.edit_text(
             text=text,
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup,
         )
-        return True
+        set_menu_message_id(chat_id, message.message_id)
     except Exception as e:
         err = str(e).lower()
         if "message is not modified" in err:
-            return True
-        log.warning("Failed to edit panel message: %s", e)
-        return False
+            set_menu_message_id(chat_id, message.message_id)
+            return
 
+        log.warning("Panel edit failed, recreating panel: %s", e)
 
-async def send_new_panel(chat_id: int, text: str, reply_markup):
-    if TG_APP is None:
-        return
+        old_id = get_menu_message_id(chat_id)
+        if old_id:
+            await remove_keyboard(chat_id, old_id)
 
-    await TG_APP.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup,
-    )
+        new_id = await send_main_panel(chat_id, text, reply_markup)
+        if new_id:
+            set_menu_message_id(chat_id, new_id)
 
 
 # ---------- Premium notify ----------
@@ -652,16 +1068,10 @@ async def send_premium_activated_message(user_id: int):
     if TG_APP is None:
         return
 
-    text = (
-        "🎉 <b>Вітаємо! Premium активовано.</b>\n\n"
-        "Тепер тобі доступний GPT-коуч 24/7.\n"
-        "Просто напиши мені повідомлення — і я відповім."
-    )
-
     try:
         await TG_APP.bot.send_message(
             chat_id=user_id,
-            text=text,
+            text=t(user_id, "premium_activated"),
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
@@ -677,88 +1087,75 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _, lost = update_user_streak(chat_id)
     ensure_user(chat_id)
 
-    if not update.effective_message:
-        return
-
-    await update.effective_message.reply_text(
-        build_main_menu_text(chat_id, include_comeback=lost),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(),
-    )
+    await open_fresh_main_panel(chat_id, include_comeback=lost)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message or not update.effective_chat:
+    if not update.effective_chat:
         return
-
-    await update.effective_message.reply_text(
-        build_main_menu_text(update.effective_chat.id),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(),
-    )
+    await open_fresh_main_panel(update.effective_chat.id, include_comeback=False)
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message or not update.effective_chat:
+    if not update.effective_chat:
         return
-
-    await update.effective_message.reply_text(
-        build_main_menu_text(update.effective_chat.id),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(),
-    )
+    await open_fresh_main_panel(update.effective_chat.id, include_comeback=False)
 
 
 async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message or not update.effective_chat:
+    if not update.effective_chat:
         return
-
-    await update.effective_message.reply_text(
-        build_main_menu_text(update.effective_chat.id),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(),
-    )
+    await open_fresh_main_panel(update.effective_chat.id, include_comeback=False)
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message or not update.effective_chat:
-        return
-
-    await update.effective_message.reply_text(
-        build_today_text(update.effective_chat.id),
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_menu_kb(),
-    )
-
-
-async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message or not update.effective_chat:
+    if not update.effective_chat or not update.effective_message:
         return
 
     chat_id = update.effective_chat.id
+    old_id = get_menu_message_id(chat_id)
+    if old_id:
+        await remove_keyboard(chat_id, old_id)
+
+    msg = await update.effective_message.reply_text(
+        build_today_text(chat_id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_menu_kb(chat_id),
+    )
+    set_menu_message_id(chat_id, msg.message_id)
+
+
+async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.effective_message:
+        return
+
+    chat_id = update.effective_chat.id
+    old_id = get_menu_message_id(chat_id)
+    if old_id:
+        await remove_keyboard(chat_id, old_id)
 
     if is_premium(chat_id):
-        await update.effective_message.reply_text(
+        msg = await update.effective_message.reply_text(
             build_premium_text(chat_id),
             parse_mode=ParseMode.HTML,
-            reply_markup=back_menu_kb(),
+            reply_markup=back_menu_kb(chat_id),
         )
+        set_menu_message_id(chat_id, msg.message_id)
         return
 
     try:
         checkout_url = create_checkout_session(chat_id)
     except Exception as e:
         log.warning("Stripe checkout session error: %s", e)
-        await update.effective_message.reply_text(
-            "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше."
-        )
+        await update.effective_message.reply_text(t(chat_id, "payment_error"))
         return
 
-    await update.effective_message.reply_text(
+    msg = await update.effective_message.reply_text(
         build_premium_text(chat_id),
         parse_mode=ParseMode.HTML,
-        reply_markup=premium_kb(checkout_url=checkout_url),
+        reply_markup=premium_kb(chat_id, checkout_url=checkout_url),
     )
+    set_menu_message_id(chat_id, msg.message_id)
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -771,141 +1168,112 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = query.message
 
     if query.data == "back_menu":
-        ok = await edit_panel_message(
+        await edit_active_panel_or_recreate(
+            user_id,
             message,
             build_main_menu_text(user_id),
-            main_menu_kb(),
+            main_menu_kb(user_id),
         )
-        if not ok:
-            await send_new_panel(
-                user_id,
-                build_main_menu_text(user_id),
-                main_menu_kb(),
-            )
         return
 
     if query.data == "get_motivation":
-        ok = await edit_panel_message(
+        await edit_active_panel_or_recreate(
+            user_id,
             message,
             build_motivation_text(user_id),
-            back_menu_kb(),
+            back_menu_kb(user_id),
         )
-        if not ok:
-            await send_new_panel(
-                user_id,
-                build_motivation_text(user_id),
-                back_menu_kb(),
-            )
         return
 
     if query.data == "extra_motivation":
-        ok = await edit_panel_message(
+        await edit_active_panel_or_recreate(
+            user_id,
             message,
             build_extra_text(user_id),
-            back_menu_kb(),
+            back_menu_kb(user_id),
         )
-        if not ok:
-            await send_new_panel(
-                user_id,
-                build_extra_text(user_id),
-                back_menu_kb(),
-            )
         return
 
     if query.data == "get_task":
-        ok = await edit_panel_message(
+        await edit_active_panel_or_recreate(
+            user_id,
             message,
             build_task_text(user_id),
-            back_menu_kb(),
+            back_menu_kb(user_id),
         )
-        if not ok:
-            await send_new_panel(
-                user_id,
-                build_task_text(user_id),
-                back_menu_kb(),
-            )
         return
 
     if query.data == "get_tip":
-        ok = await edit_panel_message(
+        await edit_active_panel_or_recreate(
+            user_id,
             message,
             build_tip_text(user_id),
-            back_menu_kb(),
+            back_menu_kb(user_id),
         )
-        if not ok:
-            await send_new_panel(
-                user_id,
-                build_tip_text(user_id),
-                back_menu_kb(),
-            )
+        return
+
+    if query.data == "change_lang":
+        await edit_active_panel_or_recreate(
+            user_id,
+            message,
+            t(user_id, "language_title"),
+            language_kb(),
+        )
+        return
+
+    if query.data in ("lang_uk", "lang_en", "lang_de"):
+        lang = query.data.split("_", 1)[1]
+        set_user_lang(user_id, lang)
+        await edit_active_panel_or_recreate(
+            user_id,
+            message,
+            build_main_menu_text(user_id),
+            main_menu_kb(user_id),
+        )
         return
 
     if query.data == "upgrade":
         if is_premium(user_id):
-            ok = await edit_panel_message(
+            await edit_active_panel_or_recreate(
+                user_id,
                 message,
                 build_premium_text(user_id),
-                back_menu_kb(),
+                back_menu_kb(user_id),
             )
-            if not ok:
-                await send_new_panel(
-                    user_id,
-                    build_premium_text(user_id),
-                    back_menu_kb(),
-                )
             return
 
         try:
             checkout_url = create_checkout_session(user_id)
         except Exception as e:
             log.warning("Stripe checkout session error: %s", e)
-            ok = await edit_panel_message(
+            await edit_active_panel_or_recreate(
+                user_id,
                 message,
-                "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
-                back_menu_kb(),
+                t(user_id, "payment_error"),
+                back_menu_kb(user_id),
             )
-            if not ok:
-                await send_new_panel(
-                    user_id,
-                    "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
-                    back_menu_kb(),
-                )
             return
 
-        ok = await edit_panel_message(
+        await edit_active_panel_or_recreate(
+            user_id,
             message,
             build_premium_text(user_id),
-            premium_kb(checkout_url=checkout_url),
+            premium_kb(user_id, checkout_url=checkout_url),
         )
-        if not ok:
-            await send_new_panel(
-                user_id,
-                build_premium_text(user_id),
-                premium_kb(checkout_url=checkout_url),
-            )
         return
 
-    ok = await edit_panel_message(
+    await edit_active_panel_or_recreate(
+        user_id,
         message,
         build_main_menu_text(user_id),
-        main_menu_kb(),
+        main_menu_kb(user_id),
     )
-    if not ok:
-        await send_new_panel(
-            user_id,
-            build_main_menu_text(user_id),
-            main_menu_kb(),
-        )
 
 
 async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message:
+    if not update.effective_chat or not update.effective_message:
         return
-
-    await update.effective_message.reply_text(
-        "📷 Я поки не аналізую фото в цьому боті.\n\n"
-        "Опиши словами свою ситуацію, ціль або проблему — і я допоможу як коуч."
-    )
+    await update.effective_message.reply_text(t(update.effective_chat.id, "photo_reply"))
 
 
 async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -921,14 +1289,11 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ensure_user(user_id)
 
     if not is_premium(user_id):
-        await update.effective_message.reply_text(
-            "🔒 GPT-коуч доступний тільки в Premium.\n\n"
-            "Натисни /upgrade, щоб відкрити доступ."
-        )
+        await update.effective_message.reply_text(t(user_id, "premium_locked"))
         return
 
     increment_message_count(user_id)
-    reply = ask_gpt(text)
+    reply = ask_gpt(user_id, text)
     await update.effective_message.reply_text(reply)
 
 
@@ -939,19 +1304,33 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not users:
         return
 
-    text = (
-        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
-        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
-        f"💡 <b>Порада дня</b>\n{content['tip']}"
-    )
-
     for uid in users:
+        lang = get_user_lang(uid)
+
+        if lang == "en":
+            text = (
+                f"🧠 <b>Motivation of the day</b>\n{content['motivation']}\n\n"
+                f"✅ <b>Task of the day</b>\n{content['task']}\n\n"
+                f"💡 <b>Tip of the day</b>\n{content['tip']}"
+            )
+        elif lang == "de":
+            text = (
+                f"🧠 <b>Motivation des Tages</b>\n{content['motivation']}\n\n"
+                f"✅ <b>Tagesaufgabe</b>\n{content['task']}\n\n"
+                f"💡 <b>Tipp des Tages</b>\n{content['tip']}"
+            )
+        else:
+            text = (
+                f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
+                f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
+                f"💡 <b>Порада дня</b>\n{content['tip']}"
+            )
+
         try:
             await context.bot.send_message(
                 chat_id=uid,
                 text=text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=main_menu_kb(),
             )
         except Exception as e:
             log.warning("Failed to send to %s: %s", uid, e)
