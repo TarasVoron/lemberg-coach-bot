@@ -82,7 +82,7 @@ COACH_KEYWORDS = (
     "рутин", "енергі", "стрес", "втом", "концентрац", "час",
     "завдан", "пріоритет", "результ", "розклад", "ранок", "вечір",
     "рішення", "сумнів", "страх", "дія", "коуч", "звички",
-    "вигоран", "прогрес", "цілеспрям", "успіх"
+    "вигоран", "прогрес", "цілеспрям", "успіх", "поштовх"
 )
 
 OFFTOPIC_PATTERNS = (
@@ -626,17 +626,31 @@ def stripe_attr(obj, key: str, default=None):
 
 
 # ---------- Telegram helpers ----------
+async def clear_message_keyboard(chat_id: int, message_id: int):
+    if TG_APP is None or not message_id:
+        return
+
+    try:
+        await TG_APP.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=None,
+        )
+    except Exception as e:
+        log.warning("Failed to clear keyboard for %s/%s: %s", chat_id, message_id, e)
+
+
 async def send_or_update_panel(chat_id: int, text: str, reply_markup=None):
     if TG_APP is None:
         return
 
-    message_id = get_menu_message_id(chat_id)
+    old_message_id = get_menu_message_id(chat_id)
 
-    if message_id:
+    if old_message_id:
         try:
             await TG_APP.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=message_id,
+                message_id=old_message_id,
                 text=text,
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
@@ -654,6 +668,10 @@ async def send_or_update_panel(chat_id: int, text: str, reply_markup=None):
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup,
     )
+
+    if old_message_id and old_message_id != msg.message_id:
+        await clear_message_keyboard(chat_id, old_message_id)
+
     set_menu_message_id(chat_id, msg.message_id)
 
 
@@ -796,6 +814,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await query.answer()
     user_id = query.from_user.id
+    current_panel_id = get_menu_message_id(user_id)
+    clicked_message_id = query.message.message_id
+
+    # Якщо натиснули кнопку на старому повідомленні —
+    # прибираємо з нього клавіатуру і повертаємо до актуальної панелі
+    if current_panel_id and clicked_message_id != current_panel_id:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            log.warning("Failed to remove keyboard from stale message: %s", e)
+
+        await send_or_update_panel(
+            user_id,
+            build_main_menu_text(user_id),
+            reply_markup=main_menu_kb(),
+        )
+        return
 
     if query.data == "back_menu":
         await send_or_update_panel(
