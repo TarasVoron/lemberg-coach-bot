@@ -72,8 +72,11 @@ stripe.api_key = STRIPE_SECRET_KEY
 app_flask = Flask(__name__)
 TG_APP: Application | None = None
 
-# Антиповтор імпульсу
+# Антиповтор "ще імпульс"
 user_last_extra_motivation: dict[int, str] = {}
+
+# Одна активна панель на користувача
+active_panel_message_ids: dict[int, int] = {}
 
 # ---------- Coach request filters ----------
 COACH_KEYWORDS = (
@@ -82,14 +85,15 @@ COACH_KEYWORDS = (
     "рутин", "енергі", "стрес", "втом", "концентрац", "час",
     "завдан", "пріоритет", "результ", "розклад", "ранок", "вечір",
     "рішення", "сумнів", "страх", "дія", "коуч", "звички",
-    "вигоран", "прогрес", "цілеспрям", "успіх", "поштовх"
+    "вигоран", "прогрес", "цілеспрям", "успіх", "поштовх",
+    "мета", "звичка", "звички", "продуктивність", "організація"
 )
 
 OFFTOPIC_PATTERNS = (
     "що це", "what is this", "як цим користуватися", "how to use this",
     "що на фото", "опиши фото", "переклади", "translate",
     "скільки коштує", "де купити", "новини", "погода", "курс валют",
-    "who is this", "хто це"
+    "who is this", "хто це", "намалюй", "створи картинку"
 )
 
 
@@ -150,7 +154,6 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
-                    "panel_message_id": 0,
                 }
             save_users_data(result)
             return result
@@ -165,7 +168,6 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
-                    "panel_message_id": 0,
                 }
                 for k, v in defaults.items():
                     if k not in user:
@@ -197,40 +199,16 @@ def ensure_user(user_id: int) -> dict:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
-            "panel_message_id": 0,
         }
         save_users_data(data)
 
     return data[uid]
 
 
-def get_user(user_id: int) -> dict:
-    ensure_user(user_id)
-    data = load_users_data()
-    return data[str(user_id)]
-
-
-def update_user(user_id: int, patch: dict) -> None:
+def is_premium(user_id: int) -> bool:
     data = load_users_data()
     uid = str(user_id)
-
-    if uid not in data:
-        data[uid] = {
-            "streak": 0,
-            "last_seen": "",
-            "premium": False,
-            "messages_count": 0,
-            "stripe_customer_id": "",
-            "stripe_subscription_id": "",
-            "panel_message_id": 0,
-        }
-
-    data[uid].update(patch)
-    save_users_data(data)
-
-
-def is_premium(user_id: int) -> bool:
-    return bool(get_user(user_id).get("premium", False))
+    return bool(data.get(uid, {}).get("premium", False))
 
 
 def set_premium(
@@ -239,12 +217,26 @@ def set_premium(
     stripe_customer_id: str = "",
     stripe_subscription_id: str = "",
 ) -> None:
-    patch = {"premium": value}
-    if stripe_customer_id:
-        patch["stripe_customer_id"] = stripe_customer_id
-    if stripe_subscription_id:
-        patch["stripe_subscription_id"] = stripe_subscription_id
-    update_user(user_id, patch)
+    data = load_users_data()
+    uid = str(user_id)
+
+    if uid not in data:
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "premium": value,
+            "messages_count": 0,
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id,
+        }
+    else:
+        data[uid]["premium"] = value
+        if stripe_customer_id:
+            data[uid]["stripe_customer_id"] = stripe_customer_id
+        if stripe_subscription_id:
+            data[uid]["stripe_subscription_id"] = stripe_subscription_id
+
+    save_users_data(data)
 
 
 def find_user_id_by_subscription(subscription_id: str) -> int | None:
@@ -256,22 +248,42 @@ def find_user_id_by_subscription(subscription_id: str) -> int | None:
 
 
 def increment_message_count(user_id: int) -> None:
-    user = get_user(user_id)
-    update_user(user_id, {"messages_count": int(user.get("messages_count", 0)) + 1})
+    data = load_users_data()
+    uid = str(user_id)
 
+    if uid not in data:
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "premium": False,
+            "messages_count": 1,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+        }
+    else:
+        data[uid]["messages_count"] = int(data[uid].get("messages_count", 0)) + 1
 
-def get_panel_message_id(user_id: int) -> int:
-    return int(get_user(user_id).get("panel_message_id", 0) or 0)
-
-
-def set_panel_message_id(user_id: int, message_id: int) -> None:
-    update_user(user_id, {"panel_message_id": message_id})
+    save_users_data(data)
 
 
 def update_user_streak(user_id: int) -> tuple[int, bool]:
-    user = get_user(user_id)
+    data = load_users_data()
+    uid = str(user_id)
     today = datetime.now(BERLIN).date()
 
+    if uid not in data:
+        data[uid] = {
+            "streak": 1,
+            "last_seen": today.isoformat(),
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+        }
+        save_users_data(data)
+        return 1, False
+
+    user = data[uid]
     last_seen_raw = user.get("last_seen", "")
     streak = int(user.get("streak", 0))
     lost = False
@@ -288,18 +300,19 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
             streak = 1
             lost = True
 
-    update_user(
-        user_id,
-        {
-            "streak": streak,
-            "last_seen": today.isoformat(),
-        },
-    )
+    user["streak"] = streak
+    user["last_seen"] = today.isoformat()
+    data[uid] = user
+    save_users_data(data)
     return streak, lost
 
 
 def get_user_streak(user_id: int) -> int:
-    return int(get_user(user_id).get("streak", 0))
+    data = load_users_data()
+    uid = str(user_id)
+    if uid not in data:
+        return 0
+    return int(data[uid].get("streak", 0))
 
 
 def get_subscribed_user_ids() -> list[int]:
@@ -384,89 +397,165 @@ def get_comeback_message() -> str:
 
 
 # ---------- UI ----------
-def build_panel_text(user_id: int, view: str = "menu", include_comeback: bool = False) -> str:
-    streak = get_user_streak(user_id)
-    streak_msg = get_streak_message(streak)
-    premium_badge = "💎 <b>Premium активний</b>\n\n" if is_premium(user_id) and view == "menu" else ""
-    comeback = get_comeback_message() + "\n\n" if include_comeback and view == "menu" else ""
+def main_menu_kb(is_premium_user: bool) -> InlineKeyboardMarkup:
+    premium_first_row = (
+        [InlineKeyboardButton("💎 Premium активний", callback_data="show_premium")]
+        if is_premium_user
+        else [InlineKeyboardButton("💳 Оформити Premium", callback_data="show_premium")]
+    )
 
-    if view == "motivation":
-        body = f"🧠 <b>Мотивація дня</b>\n\n{get_today_motivation()}"
-    elif view == "extra":
-        body = f"✨ <b>Імпульс</b>\n\n{get_extra_motivation_for_user(user_id)}"
-    elif view == "task":
-        body = f"✅ <b>Завдання дня</b>\n\n{get_today_task()}"
-    elif view == "tip":
-        body = f"💡 <b>Порада дня</b>\n\n{get_today_tip()}"
-    elif view == "premium":
-        if is_premium(user_id):
-            body = (
-                "💎 <b>Lemberg Coach Premium</b>\n\n"
-                "У тебе вже активний Premium.\n\n"
-                "Що відкрито зараз:\n"
-                "• GPT-коуч 24/7\n"
-                "• персональні відповіді під твою ситуацію\n"
-                "• швидкий доступ без повторної оплати\n\n"
-                "Просто напиши мені повідомлення — і я відповім."
-            )
-        else:
-            body = (
-                "🚀 <b>Lemberg Coach Premium</b>\n\n"
-                "Це твій персональний AI-коуч, який допомагає:\n"
-                "• не зливати день\n"
-                "• тримати фокус\n"
-                "• швидше приймати рішення\n"
-                "• рухатись без хаосу\n\n"
-                "<b>Що відкривається:</b>\n"
-                "• GPT-коуч 24/7\n"
-                "• персональні відповіді під твої цілі\n"
-                "• майбутні premium-функції\n\n"
-                "Оформи доступ кнопкою нижче."
-            )
-    else:
-        body = (
-            "👋 <b>Lemberg Coach</b>\n\n"
-            "Твій AI-коуч для дисципліни, фокусу і реальної дії.\n\n"
-            "Щодня ти отримуєш:\n"
-            "• 🧠 <b>Мотивацію дня</b>\n"
-            "• ✅ <b>Завдання дня</b>\n"
-            "• 💡 <b>Пораду дня</b>\n"
-            "• ✨ <b>Імпульс</b>\n\n"
-            f"🔥 <b>Твоя серія:</b> {streak} дн.\n"
-            f"{streak_msg}\n\n"
-            "Обери дію нижче або напиши мені повідомлення."
-        )
-
-    return comeback + premium_badge + body
-
-
-def main_menu_kb() -> InlineKeyboardMarkup:
     buttons = [
+        premium_first_row,
         [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="view:motivation")],
         [InlineKeyboardButton("✨ Ще імпульс", callback_data="view:extra")],
         [InlineKeyboardButton("✅ Завдання дня", callback_data="view:task")],
         [InlineKeyboardButton("💡 Порада дня", callback_data="view:tip")],
-        [InlineKeyboardButton("🚀 Premium", callback_data="view:premium")],
+        [InlineKeyboardButton("🏠 Головне меню", callback_data="view:menu")],
     ]
+
     if MINI_APP_URL:
         buttons.append([InlineKeyboardButton("🧭 Відкрити Mini App", url=MINI_APP_URL)])
+
     return InlineKeyboardMarkup(buttons)
 
 
-def premium_menu_kb(checkout_url: str | None, user_id: int) -> InlineKeyboardMarkup:
+# ---------- Panel text builders ----------
+def build_menu_text(user_id: int, include_comeback: bool = False) -> str:
+    streak = get_user_streak(user_id)
+    streak_msg = get_streak_message(streak)
+    premium_badge = "💎 <b>Premium активний</b>\n\n" if is_premium(user_id) else ""
+    comeback = f"{get_comeback_message()}\n\n" if include_comeback else ""
+
+    return (
+        comeback
+        + premium_badge
+        + "👋 <b>Lemberg Coach</b>\n\n"
+        + "Твій AI-коуч для дисципліни, фокусу і реальної дії.\n\n"
+        + "Щодня ти отримуєш:\n"
+        + "• 🧠 <b>Мотивацію дня</b>\n"
+        + "• ✅ <b>Завдання дня</b>\n"
+        + "• 💡 <b>Пораду дня</b>\n"
+        + "• ✨ <b>Імпульс</b>\n\n"
+        + f"🔥 <b>Твоя серія:</b> {streak} дн.\n"
+        + f"{streak_msg}\n\n"
+        + "Обери дію нижче або напиши мені повідомлення."
+    )
+
+
+def build_motivation_text() -> str:
+    return f"🧠 <b>Мотивація дня</b>\n\n{get_today_motivation()}"
+
+
+def build_extra_text(user_id: int) -> str:
+    return f"✨ <b>Імпульс</b>\n\n{get_extra_motivation_for_user(user_id)}"
+
+
+def build_task_text() -> str:
+    return f"✅ <b>Завдання дня</b>\n\n{get_today_task()}"
+
+
+def build_tip_text() -> str:
+    return f"💡 <b>Порада дня</b>\n\n{get_today_tip()}"
+
+
+def build_premium_text(user_id: int) -> str:
     if is_premium(user_id):
-        return main_menu_kb()
+        return (
+            "💎 <b>Lemberg Coach Premium</b>\n\n"
+            "У тебе вже активний Premium.\n\n"
+            "Що відкрито зараз:\n"
+            "• GPT-коуч 24/7\n"
+            "• персональні відповіді під твою ситуацію\n"
+            "• швидкий доступ без повторної оплати\n\n"
+            "Просто напиши мені повідомлення — і я відповім."
+        )
 
-    buttons = [
-        [InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)] if checkout_url else [],
-        [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="view:motivation")],
-        [InlineKeyboardButton("✨ Ще імпульс", callback_data="view:extra")],
-        [InlineKeyboardButton("✅ Завдання дня", callback_data="view:task")],
-        [InlineKeyboardButton("💡 Порада дня", callback_data="view:tip")],
-        [InlineKeyboardButton("🚀 Premium", callback_data="view:premium")],
-    ]
-    buttons = [row for row in buttons if row]
-    return InlineKeyboardMarkup(buttons)
+    return (
+        "🚀 <b>Lemberg Coach Premium</b>\n\n"
+        "Це твій персональний AI-коуч, який допомагає:\n"
+        "• не зливати день\n"
+        "• тримати фокус\n"
+        "• швидше приймати рішення\n"
+        "• рухатись без хаосу\n\n"
+        "<b>Що відкривається:</b>\n"
+        "• GPT-коуч 24/7\n"
+        "• персональні відповіді під твої цілі\n"
+        "• майбутні premium-функції\n\n"
+        "Оформи доступ кнопкою нижче."
+    )
+
+
+def build_today_text(user_id: int) -> str:
+    content = today_content()
+    streak = get_user_streak(user_id)
+    return (
+        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
+        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"💡 <b>Порада дня</b>\n{content['tip']}\n\n"
+        f"🔥 <b>Серія:</b> {streak} дн.\n"
+        f"{get_streak_message(streak)}"
+    )
+
+
+def build_panel_text(user_id: int, panel: str, include_comeback: bool = False) -> str:
+    if panel == "menu":
+        return build_menu_text(user_id, include_comeback=include_comeback)
+    if panel == "motivation":
+        return build_motivation_text()
+    if panel == "extra":
+        return build_extra_text(user_id)
+    if panel == "task":
+        return build_task_text()
+    if panel == "tip":
+        return build_tip_text()
+    if panel == "premium":
+        return build_premium_text(user_id)
+    if panel == "today":
+        return build_today_text(user_id)
+    return build_menu_text(user_id)
+
+
+# ---------- Panel renderer ----------
+async def render_panel(user_id: int, panel: str, include_comeback: bool = False) -> None:
+    if TG_APP is None:
+        return
+
+    text = build_panel_text(user_id, panel, include_comeback=include_comeback)
+    markup = main_menu_kb(is_premium(user_id))
+    current_message_id = active_panel_message_ids.get(user_id)
+
+    if current_message_id:
+        try:
+            await TG_APP.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=current_message_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+            return
+        except Exception as e:
+            err = str(e).lower()
+            if "message is not modified" in err:
+                try:
+                    await TG_APP.bot.edit_message_reply_markup(
+                        chat_id=user_id,
+                        message_id=current_message_id,
+                        reply_markup=markup,
+                    )
+                except Exception:
+                    pass
+                return
+
+            log.warning("Panel edit failed for user %s: %s", user_id, e)
+
+    sent = await TG_APP.bot.send_message(
+        chat_id=user_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+    active_panel_message_ids[user_id] = sent.message_id
 
 
 # ---------- Request scope ----------
@@ -482,7 +571,15 @@ def is_coach_request(text: str) -> bool:
     if any(k in low for k in COACH_KEYWORDS):
         return True
 
-    return len(low.split()) > 6
+    # Дозволяємо короткі практичні фрази теж
+    short_ok = (
+        "поштовх", "мотивація", "мета", "план", "день", "фокус",
+        "звичка", "звички", "дисципліна", "продуктивність"
+    )
+    if low in short_ok:
+        return True
+
+    return False
 
 
 # ---------- GPT ----------
@@ -503,7 +600,7 @@ def ask_gpt(user_text: str) -> str:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.7,
-            max_tokens=220,
+            max_tokens=240,
             messages=[
                 {
                     "role": "system",
@@ -533,11 +630,16 @@ def ask_gpt(user_text: str) -> str:
         return "⚠️ GPT тимчасово недоступний. Спробуй ще раз трохи пізніше."
 
 
-# ---------- Stripe ----------
+# ---------- Stripe checkout ----------
 def create_checkout_session(telegram_user_id: int) -> str:
     session = stripe.checkout.Session.create(
         mode="subscription",
-        line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+        line_items=[
+            {
+                "price": STRIPE_PRICE_ID,
+                "quantity": 1,
+            }
+        ],
         success_url=f"{APP_BASE_URL}/payment-success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{APP_BASE_URL}/payment-cancelled",
         client_reference_id=str(telegram_user_id),
@@ -562,68 +664,7 @@ def stripe_attr(obj, key: str, default=None):
         return default
 
 
-# ---------- Panel helpers ----------
-async def send_new_panel(chat_id: int, text: str, reply_markup) -> int:
-    if TG_APP is None:
-        return 0
-
-    msg = await TG_APP.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup,
-    )
-    set_panel_message_id(chat_id, msg.message_id)
-    return msg.message_id
-
-
-async def edit_existing_panel(chat_id: int, message_id: int, text: str, reply_markup) -> bool:
-    if TG_APP is None or not message_id:
-        return False
-
-    try:
-        await TG_APP.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup,
-        )
-        return True
-    except Exception as e:
-        err = str(e).lower()
-        if "message is not modified" in err:
-            return True
-        if "message to edit not found" in err:
-            return False
-        if "can't be edited" in err:
-            return False
-        log.warning("Panel edit failed for %s/%s: %s", chat_id, message_id, e)
-        return False
-
-
-async def render_panel(chat_id: int, view: str = "menu", include_comeback: bool = False) -> None:
-    panel_id = get_panel_message_id(chat_id)
-
-    if view == "premium" and not is_premium(chat_id):
-        try:
-            checkout_url = create_checkout_session(chat_id)
-        except Exception as e:
-            log.warning("Stripe checkout session error: %s", e)
-            text = "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше."
-            kb = main_menu_kb()
-        else:
-            text = build_panel_text(chat_id, view="premium")
-            kb = premium_menu_kb(checkout_url, chat_id)
-    else:
-        text = build_panel_text(chat_id, view=view, include_comeback=include_comeback)
-        kb = main_menu_kb()
-
-    ok = await edit_existing_panel(chat_id, panel_id, text, kb)
-    if not ok:
-        await send_new_panel(chat_id, text, kb)
-
-
+# ---------- Premium notify ----------
 async def send_premium_activated_message(user_id: int):
     if TG_APP is None:
         return
@@ -644,7 +685,7 @@ async def send_premium_activated_message(user_id: int):
         log.warning("Failed to send premium activation message to %s: %s", user_id, e)
 
     try:
-        await render_panel(user_id, "menu")
+        await render_panel(user_id, "premium")
     except Exception as e:
         log.warning("Failed to refresh panel after premium activation: %s", e)
 
@@ -657,55 +698,98 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     _, lost = update_user_streak(chat_id)
     ensure_user(chat_id)
-
     await render_panel(chat_id, "menu", include_comeback=lost)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat:
-        await render_panel(update.effective_chat.id, "menu")
+    if not update.effective_chat:
+        return
+    await render_panel(update.effective_chat.id, "menu")
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message:
+    if not update.effective_chat:
         return
-    now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
-    await update.effective_message.reply_text(f"✅ Пінг! {now} (Europe/Berlin)")
+    await render_panel(update.effective_chat.id, "menu")
 
 
 async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat:
-        await render_panel(update.effective_chat.id, "menu")
+    if not update.effective_chat:
+        return
+    await render_panel(update.effective_chat.id, "menu")
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message or not update.effective_chat:
+    if not update.effective_chat:
         return
-
-    await update.effective_message.reply_text(
-        build_panel_text(update.effective_chat.id, "menu"),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(),
-    )
+    await render_panel(update.effective_chat.id, "today")
 
 
 async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat:
-        await render_panel(update.effective_chat.id, "premium")
+    if not update.effective_chat:
+        return
+    await render_panel(update.effective_chat.id, "premium")
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not query or not query.message:
+    if not query:
         return
 
     await query.answer()
     user_id = query.from_user.id
     data = query.data or ""
 
+    if data == "show_premium":
+        if not is_premium(user_id):
+            try:
+                checkout_url = create_checkout_session(user_id)
+
+                # Спочатку оновлюємо панель у Premium стан
+                text = build_premium_text(user_id)
+                markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)],
+                    [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="view:motivation")],
+                    [InlineKeyboardButton("✨ Ще імпульс", callback_data="view:extra")],
+                    [InlineKeyboardButton("✅ Завдання дня", callback_data="view:task")],
+                    [InlineKeyboardButton("💡 Порада дня", callback_data="view:tip")],
+                    [InlineKeyboardButton("🏠 Головне меню", callback_data="view:menu")],
+                ])
+
+                msg_id = active_panel_message_ids.get(user_id)
+                if msg_id:
+                    try:
+                        await TG_APP.bot.edit_message_text(
+                            chat_id=user_id,
+                            message_id=msg_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=markup,
+                        )
+                        return
+                    except Exception as e:
+                        log.warning("Premium panel edit failed: %s", e)
+
+                sent = await TG_APP.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                )
+                active_panel_message_ids[user_id] = sent.message_id
+                return
+
+            except Exception as e:
+                log.warning("Stripe checkout session error: %s", e)
+                await render_panel(user_id, "menu")
+                return
+
+        await render_panel(user_id, "premium")
+        return
+
     if data.startswith("view:"):
-        view = data.split(":", 1)[1]
-        await render_panel(user_id, view)
+        panel = data.split(":", 1)[1]
+        await render_panel(user_id, panel)
         return
 
     await render_panel(user_id, "menu")
@@ -718,6 +802,16 @@ async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.effective_message.reply_text(
         "📷 Я поки не аналізую фото в цьому боті.\n\n"
         "Опиши словами свою ситуацію, ціль або проблему — і я допоможу як коуч."
+    )
+
+
+async def unsupported_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message:
+        return
+
+    await update.effective_message.reply_text(
+        "🎤 Голосові я поки не аналізую.\n\n"
+        "Напиши текстом свою ціль, проблему або ситуацію — і я допоможу."
     )
 
 
@@ -747,26 +841,15 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # ---------- Scheduler ----------
 async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
-    content = today_content()
     users = get_subscribed_user_ids()
     if not users:
         return
 
-    text = (
-        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
-        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
-        f"💡 <b>Порада дня</b>\n{content['tip']}"
-    )
-
     for uid in users:
         try:
-            await context.bot.send_message(
-                chat_id=uid,
-                text=text,
-                parse_mode=ParseMode.HTML,
-            )
+            await render_panel(uid, "today")
         except Exception as e:
-            log.warning("Failed to send to %s: %s", uid, e)
+            log.warning("Failed to send daily push to %s: %s", uid, e)
 
 
 def schedule_jobs(app: Application) -> None:
@@ -918,6 +1001,7 @@ def main() -> None:
     application.add_handler(CommandHandler("upgrade", upgrade_cmd))
     application.add_handler(CallbackQueryHandler(on_button))
     application.add_handler(MessageHandler(filters.PHOTO, unsupported_media))
+    application.add_handler(MessageHandler(filters.VOICE, unsupported_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_with_coach))
 
     schedule_jobs(application)
