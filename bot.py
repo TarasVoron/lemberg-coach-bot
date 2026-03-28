@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify
 import stripe
 from openai import OpenAI
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -36,7 +36,7 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
-DAILY_HOUR = int(os.getenv("DAILY_HOUR", "8"))  # <-- постав 7 або 8 у Railway
+DAILY_HOUR = int(os.getenv("DAILY_HOUR", "8"))
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -70,8 +70,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 stripe.api_key = STRIPE_SECRET_KEY
 
 app_flask = Flask(__name__)
-
-# глобальна змінна для доступу до Telegram app з webhook
 TG_APP: Application | None = None
 
 # антиповтор "ще імпульс"
@@ -377,18 +375,18 @@ def get_comeback_message() -> str:
     )
 
 
-# ---------- UI text builders ----------
+# ---------- UI texts ----------
 def build_main_menu_text(user_id: int, include_comeback: bool = False) -> str:
     streak = get_user_streak(user_id)
     streak_msg = get_streak_message(streak)
     premium_badge = "💎 <b>Premium активний</b>\n\n" if is_premium(user_id) else ""
-
     extra = get_comeback_message() + "\n\n" if include_comeback else ""
 
     return (
         extra
         + premium_badge
         + "👋 <b>Lemberg Coach</b>\n\n"
+        + "Твій AI-коуч для дисципліни, фокусу і реальної дії.\n\n"
         + "Щодня ти отримуєш:\n"
         + "• 🧠 <b>Мотивацію дня</b>\n"
         + "• ✅ <b>Завдання дня</b>\n"
@@ -405,25 +403,46 @@ def build_premium_text(user_id: int) -> str:
         return (
             "💎 <b>Lemberg Coach Premium</b>\n\n"
             "У тебе вже активний Premium.\n\n"
-            "Що відкрито:\n"
+            "Що відкрито зараз:\n"
             "• GPT-коуч 24/7\n"
-            "• персональні відповіді\n"
-            "• майбутні premium-функції"
+            "• персональні відповіді під твою ситуацію\n"
+            "• швидкий доступ без повторної оплати\n\n"
+            "Просто напиши мені повідомлення — і я відповім."
         )
 
     return (
         "🚀 <b>Lemberg Coach Premium</b>\n\n"
-        "Що відкривається:\n"
+        "Це твій персональний AI-коуч, який допомагає:\n"
+        "• не зливати день\n"
+        "• тримати фокус\n"
+        "• швидше приймати рішення\n"
+        "• рухатись без хаосу\n\n"
+        "<b>Що відкривається:</b>\n"
         "• GPT-коуч 24/7\n"
-        "• персональні відповіді\n"
+        "• персональні відповіді під твої цілі\n"
         "• майбутні premium-функції\n\n"
         "Натисни кнопку нижче для безпечної оплати."
     )
 
 
-def main_menu_kb():
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+def build_motivation_text() -> str:
+    return f"🧠 <b>Мотивація дня</b>\n\n{get_today_motivation()}"
 
+
+def build_task_text() -> str:
+    return f"✅ <b>Завдання дня</b>\n\n{get_today_task()}"
+
+
+def build_tip_text() -> str:
+    return f"💡 <b>Порада дня</b>\n\n{get_today_tip()}"
+
+
+def build_extra_text(user_id: int) -> str:
+    return f"✨ <b>Імпульс</b>\n\n{get_extra_motivation_for_user(user_id)}"
+
+
+# ---------- Keyboards ----------
+def main_menu_kb() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="get_motivation")],
         [InlineKeyboardButton("✨ Ще імпульс", callback_data="extra_motivation")],
@@ -436,24 +455,22 @@ def main_menu_kb():
     return InlineKeyboardMarkup(buttons)
 
 
-def back_menu_kb():
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+def back_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")]]
     )
 
 
-def premium_kb(checkout_url: str | None = None, is_active: bool = False):
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
+def premium_kb(checkout_url: str | None = None, is_active: bool = False) -> InlineKeyboardMarkup:
     buttons = []
+
     if is_active:
-        buttons.append([InlineKeyboardButton("💬 Написати GPT-коучу", callback_data="back_menu")])
+        buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
     else:
         if checkout_url:
             buttons.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
+        buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
 
-    buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -470,10 +487,11 @@ def ask_gpt(user_text: str) -> str:
                     "content": (
                         "Ти персональний AI-коуч Lemberg Coach. "
                         "Відповідай українською. "
-                        "Тон: сильний, впевнений, зібраний, підтримуючий. "
+                        "Звертайся до користувача на 'ти'. "
+                        "Тон: сильний, зібраний, впевнений, підтримуючий. "
                         "Будь коротким, конкретним і корисним. "
                         "Не пиши довгі есе. "
-                        "Якщо доречно, давай відповідь у форматі:\n"
+                        "Якщо доречно, використовуй формат:\n"
                         "1) короткий висновок\n"
                         "2) 2-4 практичні кроки\n"
                         "3) 1 сильна фінальна фраза.\n"
@@ -508,7 +526,7 @@ def create_checkout_session(telegram_user_id: int) -> str:
     return session.url
 
 
-# ---------- Safe Stripe field helpers ----------
+# ---------- Stripe helpers ----------
 def stripe_attr(obj, key: str, default=None):
     if obj is None:
         return default
@@ -525,20 +543,18 @@ def stripe_attr(obj, key: str, default=None):
 
 
 # ---------- Telegram helpers ----------
-async def safe_edit_or_send(query, text: str, reply_markup=None):
+async def safe_edit_menu(query, text: str, reply_markup=None):
     try:
-        await query.edit_message_text(
+        await query.message.edit_text(
             text=text,
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup,
         )
-    except Exception:
-        if query.message:
-            await query.message.reply_text(
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
+    except Exception as e:
+        err = str(e).lower()
+        if "message is not modified" in err:
+            return
+        log.warning("Menu edit failed: %s", e)
 
 
 async def send_premium_activated_message(user_id: int):
@@ -569,9 +585,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     streak, lost = update_user_streak(chat_id)
 
-    text = build_main_menu_text(chat_id, include_comeback=lost)
     await update.effective_message.reply_text(
-        text=text,
+        text=build_main_menu_text(chat_id, include_comeback=lost),
         reply_markup=main_menu_kb(),
         parse_mode=ParseMode.HTML,
     )
@@ -671,10 +686,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await query.answer()
     user_id = query.from_user.id
-    content = today_content()
 
     if query.data == "back_menu":
-        await safe_edit_or_send(
+        await safe_edit_menu(
             query,
             build_main_menu_text(user_id),
             reply_markup=main_menu_kb(),
@@ -682,29 +696,40 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if query.data == "get_motivation":
-        text = f"🧠 <b>Мотивація дня</b>\n\n{content['motivation']}"
-        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
+        await safe_edit_menu(
+            query,
+            build_motivation_text(),
+            reply_markup=back_menu_kb(),
+        )
         return
 
     if query.data == "extra_motivation":
-        extra = get_extra_motivation_for_user(user_id)
-        text = f"✨ <b>Імпульс</b>\n\n{extra}"
-        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
+        await safe_edit_menu(
+            query,
+            build_extra_text(user_id),
+            reply_markup=back_menu_kb(),
+        )
         return
 
     if query.data == "get_task":
-        text = f"✅ <b>Завдання дня</b>\n\n{content['task']}"
-        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
+        await safe_edit_menu(
+            query,
+            build_task_text(),
+            reply_markup=back_menu_kb(),
+        )
         return
 
     if query.data == "get_tip":
-        text = f"💡 <b>Порада дня</b>\n\n{content['tip']}"
-        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
+        await safe_edit_menu(
+            query,
+            build_tip_text(),
+            reply_markup=back_menu_kb(),
+        )
         return
 
     if query.data == "upgrade":
         if is_premium(user_id):
-            await safe_edit_or_send(
+            await safe_edit_menu(
                 query,
                 build_premium_text(user_id),
                 reply_markup=premium_kb(is_active=True),
@@ -715,21 +740,21 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             checkout_url = create_checkout_session(user_id)
         except Exception as e:
             log.warning("Stripe checkout session error: %s", e)
-            await safe_edit_or_send(
+            await safe_edit_menu(
                 query,
                 "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
                 reply_markup=back_menu_kb(),
             )
             return
 
-        await safe_edit_or_send(
+        await safe_edit_menu(
             query,
             build_premium_text(user_id),
             reply_markup=premium_kb(checkout_url=checkout_url),
         )
         return
 
-    await safe_edit_or_send(
+    await safe_edit_menu(
         query,
         "Невідома дія. Спробуй ще раз.",
         reply_markup=main_menu_kb(),
