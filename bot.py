@@ -92,7 +92,6 @@ OFFTOPIC_PATTERNS = (
     "who is this", "хто це"
 )
 
-
 # ---------- Data helpers ----------
 def load_json_list(path: Path, fallback: list[str]) -> list[str]:
     try:
@@ -150,7 +149,6 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
-                    "menu_message_id": 0,
                 }
             save_users_data(result)
             return result
@@ -165,7 +163,6 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
-                    "menu_message_id": 0,
                 }
                 for k, v in defaults.items():
                     if k not in user:
@@ -197,7 +194,6 @@ def ensure_user(user_id: int) -> dict:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
-            "menu_message_id": 0,
         }
         save_users_data(data)
 
@@ -227,7 +223,6 @@ def set_premium(
             "messages_count": 0,
             "stripe_customer_id": stripe_customer_id,
             "stripe_subscription_id": stripe_subscription_id,
-            "menu_message_id": 0,
         }
     else:
         data[uid]["premium"] = value
@@ -259,7 +254,6 @@ def increment_message_count(user_id: int) -> None:
             "messages_count": 1,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
-            "menu_message_id": 0,
         }
     else:
         data[uid]["messages_count"] = int(data[uid].get("messages_count", 0)) + 1
@@ -280,7 +274,6 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
-            "menu_message_id": 0,
         }
         save_users_data(data)
         return 1, False
@@ -371,32 +364,6 @@ def get_extra_motivation_for_user(user_id: int) -> str:
     return result
 
 
-def get_menu_message_id(user_id: int) -> int:
-    data = load_users_data()
-    uid = str(user_id)
-    return int(data.get(uid, {}).get("menu_message_id", 0) or 0)
-
-
-def set_menu_message_id(user_id: int, message_id: int) -> None:
-    data = load_users_data()
-    uid = str(user_id)
-
-    if uid not in data:
-        data[uid] = {
-            "streak": 0,
-            "last_seen": "",
-            "premium": False,
-            "messages_count": 0,
-            "stripe_customer_id": "",
-            "stripe_subscription_id": "",
-            "menu_message_id": message_id,
-        }
-    else:
-        data[uid]["menu_message_id"] = message_id
-
-    save_users_data(data)
-
-
 # ---------- Streak messaging ----------
 def get_streak_message(streak: int) -> str:
     if streak >= 21:
@@ -447,6 +414,38 @@ def build_main_menu_text(user_id: int, include_comeback: bool = False) -> str:
     )
 
 
+def build_motivation_text(user_id: int) -> str:
+    return (
+        "🧠 <b>Мотивація дня</b>\n\n"
+        f"{get_today_motivation()}\n\n"
+        "Натисни «Назад у меню», щоб повернутись."
+    )
+
+
+def build_extra_text(user_id: int) -> str:
+    return (
+        "✨ <b>Імпульс</b>\n\n"
+        f"{get_extra_motivation_for_user(user_id)}\n\n"
+        "Натисни «Назад у меню», щоб повернутись."
+    )
+
+
+def build_task_text(user_id: int) -> str:
+    return (
+        "✅ <b>Завдання дня</b>\n\n"
+        f"{get_today_task()}\n\n"
+        "Натисни «Назад у меню», щоб повернутись."
+    )
+
+
+def build_tip_text(user_id: int) -> str:
+    return (
+        "💡 <b>Порада дня</b>\n\n"
+        f"{get_today_tip()}\n\n"
+        "Натисни «Назад у меню», щоб повернутись."
+    )
+
+
 def build_premium_text(user_id: int) -> str:
     if is_premium(user_id):
         return (
@@ -474,20 +473,16 @@ def build_premium_text(user_id: int) -> str:
     )
 
 
-def build_motivation_text() -> str:
-    return f"🧠 <b>Мотивація дня</b>\n\n{get_today_motivation()}"
-
-
-def build_task_text() -> str:
-    return f"✅ <b>Завдання дня</b>\n\n{get_today_task()}"
-
-
-def build_tip_text() -> str:
-    return f"💡 <b>Порада дня</b>\n\n{get_today_tip()}"
-
-
-def build_extra_text(user_id: int) -> str:
-    return f"✨ <b>Імпульс</b>\n\n{get_extra_motivation_for_user(user_id)}"
+def build_today_text(user_id: int) -> str:
+    content = today_content()
+    streak = get_user_streak(user_id)
+    return (
+        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
+        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"💡 <b>Порада дня</b>\n{content['tip']}\n\n"
+        f"🔥 <b>Серія:</b> {streak} дн.\n"
+        f"{get_streak_message(streak)}"
+    )
 
 
 # ---------- Keyboards ----------
@@ -511,15 +506,13 @@ def back_menu_kb() -> InlineKeyboardMarkup:
 
 
 def premium_kb(checkout_url: str | None = None, is_active: bool = False) -> InlineKeyboardMarkup:
-    buttons = []
-
     if is_active:
-        buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
-    else:
-        if checkout_url:
-            buttons.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
-        buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
+        return back_menu_kb()
 
+    buttons = []
+    if checkout_url:
+        buttons.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
+    buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -625,56 +618,36 @@ def stripe_attr(obj, key: str, default=None):
         return default
 
 
-# ---------- Telegram helpers ----------
-async def clear_message_keyboard(chat_id: int, message_id: int):
-    if TG_APP is None or not message_id:
-        return
-
+# ---------- Panel editors ----------
+async def edit_panel_message(message, text: str, reply_markup):
     try:
-        await TG_APP.bot.edit_message_reply_markup(
-            chat_id=chat_id,
-            message_id=message_id,
-            reply_markup=None,
+        await message.edit_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
         )
+        return True
     except Exception as e:
-        log.warning("Failed to clear keyboard for %s/%s: %s", chat_id, message_id, e)
+        err = str(e).lower()
+        if "message is not modified" in err:
+            return True
+        log.warning("Failed to edit panel message: %s", e)
+        return False
 
 
-async def send_or_update_panel(chat_id: int, text: str, reply_markup=None):
+async def send_new_panel(chat_id: int, text: str, reply_markup):
     if TG_APP is None:
         return
 
-    old_message_id = get_menu_message_id(chat_id)
-
-    if old_message_id:
-        try:
-            await TG_APP.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=old_message_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-            return
-        except Exception as e:
-            err = str(e).lower()
-            if "message is not modified" in err:
-                return
-            log.warning("Panel edit failed for %s: %s", chat_id, e)
-
-    msg = await TG_APP.bot.send_message(
+    await TG_APP.bot.send_message(
         chat_id=chat_id,
         text=text,
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup,
     )
 
-    if old_message_id and old_message_id != msg.message_id:
-        await clear_message_keyboard(chat_id, old_message_id)
 
-    set_menu_message_id(chat_id, msg.message_id)
-
-
+# ---------- Premium notify ----------
 async def send_premium_activated_message(user_id: int):
     if TG_APP is None:
         return
@@ -694,15 +667,6 @@ async def send_premium_activated_message(user_id: int):
     except Exception as e:
         log.warning("Failed to send premium activation message to %s: %s", user_id, e)
 
-    try:
-        await send_or_update_panel(
-            user_id,
-            build_main_menu_text(user_id),
-            reply_markup=main_menu_kb(),
-        )
-    except Exception as e:
-        log.warning("Failed to refresh main panel after premium activation: %s", e)
-
 
 # ---------- Telegram handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -710,75 +674,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     chat_id = update.effective_chat.id
-    streak, lost = update_user_streak(chat_id)
+    _, lost = update_user_streak(chat_id)
     ensure_user(chat_id)
 
-    await send_or_update_panel(
-        chat_id,
+    if not update.effective_message:
+        return
+
+    await update.effective_message.reply_text(
         build_main_menu_text(chat_id, include_comeback=lost),
-        reply_markup=main_menu_kb(),
-    )
-
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message:
-        return
-
-    await update.effective_message.reply_text(
-        "Команди:\n"
-        "/start — головне меню\n"
-        "/ping — перевірка\n"
-        "/today — весь контент дня\n"
-        "/streak — твоя серія\n"
-        "/upgrade — Premium\n"
-        "/help — допомога\n\n"
-        "Premium відкриває GPT-коуча 24/7."
-    )
-
-
-async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message:
-        return
-    now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
-    await update.effective_message.reply_text(f"✅ Пінг! {now} (Europe/Berlin)")
-
-
-async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat or not update.effective_message:
-        return
-
-    streak = get_user_streak(update.effective_chat.id)
-    if streak <= 0:
-        text = "🔥 Серія ще не почалась. Натисни /start і починай ритм."
-    else:
-        text = f"🔥 <b>Твоя серія:</b> {streak} дн.\n{get_streak_message(streak)}"
-
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
-
-
-async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat or not update.effective_message:
-        return
-
-    content = today_content()
-    streak = get_user_streak(update.effective_chat.id)
-
-    text = (
-        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
-        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
-        f"💡 <b>Порада дня</b>\n{content['tip']}\n\n"
-        f"🔥 <b>Серія:</b> {streak} дн.\n"
-        f"{get_streak_message(streak)}"
-    )
-    await update.effective_message.reply_text(
-        text=text,
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb(),
     )
 
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_chat:
+        return
+
+    await update.effective_message.reply_text(
+        build_main_menu_text(update.effective_chat.id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_kb(),
+    )
+
+
+async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_chat:
+        return
+
+    await update.effective_message.reply_text(
+        build_main_menu_text(update.effective_chat.id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_kb(),
+    )
+
+
+async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_chat:
+        return
+
+    await update.effective_message.reply_text(
+        build_main_menu_text(update.effective_chat.id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_kb(),
+    )
+
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_chat:
+        return
+
+    await update.effective_message.reply_text(
+        build_today_text(update.effective_chat.id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_menu_kb(),
+    )
+
+
 async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat or not update.effective_message:
+    if not update.effective_message or not update.effective_chat:
         return
 
     chat_id = update.effective_chat.id
@@ -787,7 +741,7 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text(
             build_premium_text(chat_id),
             parse_mode=ParseMode.HTML,
-            reply_markup=premium_kb(is_active=True),
+            reply_markup=back_menu_kb(),
         )
         return
 
@@ -814,96 +768,134 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await query.answer()
     user_id = query.from_user.id
-    current_panel_id = get_menu_message_id(user_id)
-    clicked_message_id = query.message.message_id
-
-    # Якщо натиснули кнопку на старому повідомленні —
-    # прибираємо з нього клавіатуру і повертаємо до актуальної панелі
-    if current_panel_id and clicked_message_id != current_panel_id:
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except Exception as e:
-            log.warning("Failed to remove keyboard from stale message: %s", e)
-
-        await send_or_update_panel(
-            user_id,
-            build_main_menu_text(user_id),
-            reply_markup=main_menu_kb(),
-        )
-        return
+    message = query.message
 
     if query.data == "back_menu":
-        await send_or_update_panel(
-            user_id,
+        ok = await edit_panel_message(
+            message,
             build_main_menu_text(user_id),
-            reply_markup=main_menu_kb(),
+            main_menu_kb(),
         )
+        if not ok:
+            await send_new_panel(
+                user_id,
+                build_main_menu_text(user_id),
+                main_menu_kb(),
+            )
         return
 
     if query.data == "get_motivation":
-        await send_or_update_panel(
-            user_id,
-            build_motivation_text(),
-            reply_markup=back_menu_kb(),
+        ok = await edit_panel_message(
+            message,
+            build_motivation_text(user_id),
+            back_menu_kb(),
         )
+        if not ok:
+            await send_new_panel(
+                user_id,
+                build_motivation_text(user_id),
+                back_menu_kb(),
+            )
         return
 
     if query.data == "extra_motivation":
-        await send_or_update_panel(
-            user_id,
+        ok = await edit_panel_message(
+            message,
             build_extra_text(user_id),
-            reply_markup=back_menu_kb(),
+            back_menu_kb(),
         )
+        if not ok:
+            await send_new_panel(
+                user_id,
+                build_extra_text(user_id),
+                back_menu_kb(),
+            )
         return
 
     if query.data == "get_task":
-        await send_or_update_panel(
-            user_id,
-            build_task_text(),
-            reply_markup=back_menu_kb(),
+        ok = await edit_panel_message(
+            message,
+            build_task_text(user_id),
+            back_menu_kb(),
         )
+        if not ok:
+            await send_new_panel(
+                user_id,
+                build_task_text(user_id),
+                back_menu_kb(),
+            )
         return
 
     if query.data == "get_tip":
-        await send_or_update_panel(
-            user_id,
-            build_tip_text(),
-            reply_markup=back_menu_kb(),
+        ok = await edit_panel_message(
+            message,
+            build_tip_text(user_id),
+            back_menu_kb(),
         )
+        if not ok:
+            await send_new_panel(
+                user_id,
+                build_tip_text(user_id),
+                back_menu_kb(),
+            )
         return
 
     if query.data == "upgrade":
         if is_premium(user_id):
-            await send_or_update_panel(
-                user_id,
+            ok = await edit_panel_message(
+                message,
                 build_premium_text(user_id),
-                reply_markup=premium_kb(is_active=True),
+                back_menu_kb(),
             )
+            if not ok:
+                await send_new_panel(
+                    user_id,
+                    build_premium_text(user_id),
+                    back_menu_kb(),
+                )
             return
 
         try:
             checkout_url = create_checkout_session(user_id)
         except Exception as e:
             log.warning("Stripe checkout session error: %s", e)
-            await send_or_update_panel(
-                user_id,
+            ok = await edit_panel_message(
+                message,
                 "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
-                reply_markup=back_menu_kb(),
+                back_menu_kb(),
             )
+            if not ok:
+                await send_new_panel(
+                    user_id,
+                    "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
+                    back_menu_kb(),
+                )
             return
 
-        await send_or_update_panel(
-            user_id,
+        ok = await edit_panel_message(
+            message,
             build_premium_text(user_id),
-            reply_markup=premium_kb(checkout_url=checkout_url),
+            premium_kb(checkout_url=checkout_url),
         )
+        if not ok:
+            await send_new_panel(
+                user_id,
+                build_premium_text(user_id),
+                premium_kb(checkout_url=checkout_url),
+            )
         return
 
-    await send_or_update_panel(
-        user_id,
-        "Невідома дія. Спробуй ще раз.",
-        reply_markup=main_menu_kb(),
+    ok = await edit_panel_message(
+        message,
+        build_main_menu_text(user_id),
+        main_menu_kb(),
     )
+    if not ok:
+        await send_new_panel(
+            user_id,
+            build_main_menu_text(user_id),
+            main_menu_kb(),
+        )
 
 
 async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
