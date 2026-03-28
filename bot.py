@@ -75,41 +75,22 @@ TG_APP: Application | None = None
 # антиповтор "ще імпульс"
 user_last_extra_motivation: dict[int, str] = {}
 
-# ---------- Coach boundaries ----------
+# ---------- Coach request filters ----------
 COACH_KEYWORDS = (
     "план", "день", "ціль", "цілі", "дисцип", "фокус", "продуктив",
     "мотивац", "звич", "саморозвит", "прокраст", "відкладан",
     "рутин", "енергі", "стрес", "втом", "концентрац", "час",
     "завдан", "пріоритет", "результ", "розклад", "ранок", "вечір",
-    "рішення", "сумнів", "страх", "дія", "коуч", "звички", "працю",
-    "робот", "навчан", "результат", "лінощ", "сила", "звичка"
+    "рішення", "сумнів", "страх", "дія", "коуч", "звички",
+    "вигоран", "прогрес", "цілеспрям", "успіх"
 )
 
 OFFTOPIC_PATTERNS = (
     "що це", "what is this", "як цим користуватися", "how to use this",
     "що на фото", "опиши фото", "переклади", "translate",
     "скільки коштує", "де купити", "новини", "погода", "курс валют",
-    "who is this", "хто це", "проаналізуй картинку", "аналіз фото",
-    "розкажи про товар", "що зображено"
+    "who is this", "хто це"
 )
-
-
-def is_coach_request(text: str) -> bool:
-    low = (text or "").strip().lower()
-
-    if not low:
-        return False
-
-    if any(p in low for p in OFFTOPIC_PATTERNS):
-        return False
-
-    if any(k in low for k in COACH_KEYWORDS):
-        return True
-
-    if len(low.split()) <= 6:
-        return False
-
-    return False
 
 
 # ---------- Data helpers ----------
@@ -341,32 +322,6 @@ def get_subscribed_user_ids() -> list[int]:
     return [int(uid) for uid in data.keys()]
 
 
-def get_menu_message_id(user_id: int) -> int:
-    data = load_users_data()
-    uid = str(user_id)
-    return int(data.get(uid, {}).get("menu_message_id", 0) or 0)
-
-
-def set_menu_message_id(user_id: int, message_id: int) -> None:
-    data = load_users_data()
-    uid = str(user_id)
-
-    if uid not in data:
-        data[uid] = {
-            "streak": 0,
-            "last_seen": "",
-            "premium": False,
-            "messages_count": 0,
-            "stripe_customer_id": "",
-            "stripe_subscription_id": "",
-            "menu_message_id": message_id,
-        }
-    else:
-        data[uid]["menu_message_id"] = message_id
-
-    save_users_data(data)
-
-
 def get_day_index() -> int:
     base = datetime(2025, 1, 1, tzinfo=BERLIN)
     now = datetime.now(BERLIN)
@@ -414,6 +369,32 @@ def get_extra_motivation_for_user(user_id: int) -> str:
     result = random.choice(available)
     user_last_extra_motivation[user_id] = result
     return result
+
+
+def get_menu_message_id(user_id: int) -> int:
+    data = load_users_data()
+    uid = str(user_id)
+    return int(data.get(uid, {}).get("menu_message_id", 0) or 0)
+
+
+def set_menu_message_id(user_id: int, message_id: int) -> None:
+    data = load_users_data()
+    uid = str(user_id)
+
+    if uid not in data:
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+            "menu_message_id": message_id,
+        }
+    else:
+        data[uid]["menu_message_id"] = message_id
+
+    save_users_data(data)
 
 
 # ---------- Streak messaging ----------
@@ -542,6 +523,25 @@ def premium_kb(checkout_url: str | None = None, is_active: bool = False) -> Inli
     return InlineKeyboardMarkup(buttons)
 
 
+# ---------- Request scope ----------
+def is_coach_request(text: str) -> bool:
+    low = (text or "").strip().lower()
+
+    if not low:
+        return False
+
+    if any(p in low for p in OFFTOPIC_PATTERNS):
+        return False
+
+    if any(k in low for k in COACH_KEYWORDS):
+        return True
+
+    if len(low.split()) <= 6:
+        return False
+
+    return False
+
+
 # ---------- GPT ----------
 def ask_gpt(user_text: str) -> str:
     if not is_coach_request(user_text):
@@ -666,6 +666,7 @@ async def send_premium_activated_message(user_id: int):
         "Тепер тобі доступний GPT-коуч 24/7.\n"
         "Просто напиши мені повідомлення — і я відповім."
     )
+
     try:
         await TG_APP.bot.send_message(
             chat_id=user_id,
@@ -765,9 +766,9 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
 
     if is_premium(chat_id):
-        await send_or_update_panel(
-            chat_id,
+        await update.effective_message.reply_text(
             build_premium_text(chat_id),
+            parse_mode=ParseMode.HTML,
             reply_markup=premium_kb(is_active=True),
         )
         return
@@ -781,9 +782,9 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await send_or_update_panel(
-        chat_id,
+    await update.effective_message.reply_text(
         build_premium_text(chat_id),
+        parse_mode=ParseMode.HTML,
         reply_markup=premium_kb(checkout_url=checkout_url),
     )
 
@@ -1042,4 +1043,50 @@ def stripe_webhook():
         tg_user_id = find_user_id_by_subscription(subscription_id)
         if tg_user_id:
             set_premium(tg_user_id, False)
-            log.info("Premium
+            log.info("Premium disabled for Telegram user %s (subscription deleted)", tg_user_id)
+
+    elif event_type == "customer.subscription.updated":
+        subscription_id = str(stripe_attr(obj, "id", "") or "")
+        status = str(stripe_attr(obj, "status", "") or "")
+        tg_user_id = find_user_id_by_subscription(subscription_id)
+
+        if tg_user_id and status not in ("active", "trialing"):
+            set_premium(tg_user_id, False)
+            log.info("Premium disabled for Telegram user %s (status=%s)", tg_user_id, status)
+
+    return "ok", 200
+
+
+def run_web_server() -> None:
+    app_flask.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+
+
+# ---------- Main ----------
+def main() -> None:
+    global TG_APP
+
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+
+    application = Application.builder().token(BOT_TOKEN).build()
+    TG_APP = application
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("ping", ping_cmd))
+    application.add_handler(CommandHandler("today", today_cmd))
+    application.add_handler(CommandHandler("streak", streak_cmd))
+    application.add_handler(CommandHandler("upgrade", upgrade_cmd))
+    application.add_handler(CallbackQueryHandler(on_button))
+    application.add_handler(MessageHandler(filters.PHOTO, unsupported_media))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_with_coach))
+
+    schedule_jobs(application)
+    application.post_init = notify_owner_started
+
+    log.info("Bot started. Press Ctrl+C to stop.")
+    application.run_polling(close_loop=False)
+
+
+if __name__ == "__main__":
+    main()
