@@ -3,6 +3,7 @@ import json
 import random
 import logging
 import threading
+import asyncio
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -13,7 +14,7 @@ from flask import Flask, request, jsonify
 import stripe
 from openai import OpenAI
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -35,7 +36,7 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
-DAILY_HOUR = int(os.getenv("DAILY_HOUR", "9"))
+DAILY_HOUR = int(os.getenv("DAILY_HOUR", "8"))  # <-- постав 7 або 8 у Railway
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -69,6 +70,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 stripe.api_key = STRIPE_SECRET_KEY
 
 app_flask = Flask(__name__)
+
+# глобальна змінна для доступу до Telegram app з webhook
+TG_APP: Application | None = None
 
 # антиповтор "ще імпульс"
 user_last_extra_motivation: dict[int, str] = {}
@@ -120,7 +124,6 @@ def load_users_data() -> dict:
         with open(USERS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Міграція зі старого формату: список ID -> словник
         if isinstance(data, list):
             result = {}
             today = today_str()
@@ -197,6 +200,7 @@ def set_premium(
 ) -> None:
     data = load_users_data()
     uid = str(user_id)
+
     if uid not in data:
         data[uid] = {
             "streak": 0,
@@ -212,6 +216,7 @@ def set_premium(
             data[uid]["stripe_customer_id"] = stripe_customer_id
         if stripe_subscription_id:
             data[uid]["stripe_subscription_id"] = stripe_subscription_id
+
     save_users_data(data)
 
 
@@ -226,6 +231,7 @@ def find_user_id_by_subscription(subscription_id: str) -> int | None:
 def increment_message_count(user_id: int) -> None:
     data = load_users_data()
     uid = str(user_id)
+
     if uid not in data:
         data[uid] = {
             "streak": 0,
@@ -237,6 +243,7 @@ def increment_message_count(user_id: int) -> None:
         }
     else:
         data[uid]["messages_count"] = int(data[uid].get("messages_count", 0)) + 1
+
     save_users_data(data)
 
 
@@ -365,14 +372,58 @@ def get_streak_message(streak: int) -> str:
 def get_comeback_message() -> str:
     return (
         "⚠️ Ти випав з ритму.\n\n"
-        "Але слухай уважно:\n"
-        "повернутись — це сильніше, ніж не падати.\n\n"
+        "Але повернутись — це сильніше, ніж не падати.\n\n"
         "Сьогодні = новий старт."
     )
 
 
-# ---------- UI ----------
-def main_menu_kb() -> InlineKeyboardMarkup:
+# ---------- UI text builders ----------
+def build_main_menu_text(user_id: int, include_comeback: bool = False) -> str:
+    streak = get_user_streak(user_id)
+    streak_msg = get_streak_message(streak)
+    premium_badge = "💎 <b>Premium активний</b>\n\n" if is_premium(user_id) else ""
+
+    extra = get_comeback_message() + "\n\n" if include_comeback else ""
+
+    return (
+        extra
+        + premium_badge
+        + "👋 <b>Lemberg Coach</b>\n\n"
+        + "Щодня ти отримуєш:\n"
+        + "• 🧠 <b>Мотивацію дня</b>\n"
+        + "• ✅ <b>Завдання дня</b>\n"
+        + "• 💡 <b>Пораду дня</b>\n"
+        + "• ✨ <b>Імпульс</b>\n\n"
+        + f"🔥 <b>Твоя серія:</b> {streak} дн.\n"
+        + f"{streak_msg}\n\n"
+        + "Обери дію нижче або напиши мені повідомлення."
+    )
+
+
+def build_premium_text(user_id: int) -> str:
+    if is_premium(user_id):
+        return (
+            "💎 <b>Lemberg Coach Premium</b>\n\n"
+            "У тебе вже активний Premium.\n\n"
+            "Що відкрито:\n"
+            "• GPT-коуч 24/7\n"
+            "• персональні відповіді\n"
+            "• майбутні premium-функції"
+        )
+
+    return (
+        "🚀 <b>Lemberg Coach Premium</b>\n\n"
+        "Що відкривається:\n"
+        "• GPT-коуч 24/7\n"
+        "• персональні відповіді\n"
+        "• майбутні premium-функції\n\n"
+        "Натисни кнопку нижче для безпечної оплати."
+    )
+
+
+def main_menu_kb():
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
     buttons = [
         [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="get_motivation")],
         [InlineKeyboardButton("✨ Ще імпульс", callback_data="extra_motivation")],
@@ -385,19 +436,48 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def back_menu_kb():
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")]]
+    )
+
+
+def premium_kb(checkout_url: str | None = None, is_active: bool = False):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    buttons = []
+    if is_active:
+        buttons.append([InlineKeyboardButton("💬 Написати GPT-коучу", callback_data="back_menu")])
+    else:
+        if checkout_url:
+            buttons.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
+
+    buttons.append([InlineKeyboardButton("⬅️ Назад у меню", callback_data="back_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
 # ---------- GPT ----------
 def ask_gpt(user_text: str) -> str:
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
+            temperature=0.7,
+            max_tokens=220,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "Ти жорсткий, але підтримуючий персональний коуч. "
+                        "Ти персональний AI-коуч Lemberg Coach. "
                         "Відповідай українською. "
-                        "Будь коротким, сильним, конкретним. "
-                        "Не будь токсичним. Не пиши довгі есе."
+                        "Тон: сильний, впевнений, зібраний, підтримуючий. "
+                        "Будь коротким, конкретним і корисним. "
+                        "Не пиши довгі есе. "
+                        "Якщо доречно, давай відповідь у форматі:\n"
+                        "1) короткий висновок\n"
+                        "2) 2-4 практичні кроки\n"
+                        "3) 1 сильна фінальна фраза.\n"
+                        "Не будь токсичним, не принижуй, не моралізуй."
                     ),
                 },
                 {"role": "user", "content": user_text},
@@ -409,7 +489,7 @@ def ask_gpt(user_text: str) -> str:
         return "⚠️ GPT тимчасово недоступний. Спробуй ще раз трохи пізніше."
 
 
-# ---------- Stripe checkout session ----------
+# ---------- Stripe checkout ----------
 def create_checkout_session(telegram_user_id: int) -> str:
     session = stripe.checkout.Session.create(
         mode="subscription",
@@ -428,6 +508,59 @@ def create_checkout_session(telegram_user_id: int) -> str:
     return session.url
 
 
+# ---------- Safe Stripe field helpers ----------
+def stripe_attr(obj, key: str, default=None):
+    if obj is None:
+        return default
+    try:
+        value = getattr(obj, key)
+        return default if value is None else value
+    except Exception:
+        pass
+    try:
+        value = obj[key]
+        return default if value is None else value
+    except Exception:
+        return default
+
+
+# ---------- Telegram helpers ----------
+async def safe_edit_or_send(query, text: str, reply_markup=None):
+    try:
+        await query.edit_message_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        if query.message:
+            await query.message.reply_text(
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+            )
+
+
+async def send_premium_activated_message(user_id: int):
+    if TG_APP is None:
+        return
+
+    text = (
+        "🎉 <b>Вітаємо! Premium активовано.</b>\n\n"
+        "Тепер тобі доступний GPT-коуч 24/7.\n"
+        "Просто напиши мені повідомлення — і я відповім."
+    )
+    try:
+        await TG_APP.bot.send_message(
+            chat_id=user_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_kb(),
+        )
+    except Exception as e:
+        log.warning("Failed to send premium activation message to %s: %s", user_id, e)
+
+
 # ---------- Telegram handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_message:
@@ -435,25 +568,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     chat_id = update.effective_chat.id
     streak, lost = update_user_streak(chat_id)
-    streak_msg = get_streak_message(streak)
-    premium_badge = "💎 Premium активний\n\n" if is_premium(chat_id) else ""
 
-    extra = ""
-    if lost:
-        extra = get_comeback_message() + "\n\n"
-
-    text = (
-        extra
-        + premium_badge
-        + "👋 Привіт! Це <b>Lemberg Coach Bot</b>.\n\n"
-        "Щодня ти отримуватимеш:\n"
-        "• 🧠 <b>Мотивацію дня</b>\n"
-        "• 🎯 <b>Завдання дня</b>\n"
-        "• 💡 <b>Пораду дня</b>\n\n"
-        f"🔥 <b>Твоя серія:</b> {streak} дн.\n"
-        f"{streak_msg}\n\n"
-        "Натисни кнопку нижче або напиши мені повідомлення."
-    )
+    text = build_main_menu_text(chat_id, include_comeback=lost)
     await update.effective_message.reply_text(
         text=text,
         reply_markup=main_menu_kb(),
@@ -466,12 +582,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.effective_message.reply_text(
-        "Доступні команди:\n"
-        "/start — меню\n"
+        "Команди:\n"
+        "/start — головне меню\n"
         "/ping — перевірка\n"
-        "/today — показати весь контент дня\n"
-        "/streak — показати серію днів\n"
-        "/upgrade — Premium доступ\n"
+        "/today — весь контент дня\n"
+        "/streak — твоя серія\n"
+        "/upgrade — Premium\n"
         "/help — допомога\n\n"
         "Premium відкриває GPT-коуча 24/7."
     )
@@ -492,25 +608,24 @@ async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if streak <= 0:
         text = "🔥 Серія ще не почалась. Натисни /start і починай ритм."
     else:
-        streak_msg = get_streak_message(streak)
-        text = f"🔥 Твоя серія: <b>{streak} дн.</b>\n{streak_msg}"
+        text = f"🔥 <b>Твоя серія:</b> {streak} дн.\n{get_streak_message(streak)}"
+
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message:
+    if not update.effective_chat or not update.effective_message:
         return
 
     content = today_content()
-    streak = get_user_streak(update.effective_chat.id) if update.effective_chat else 0
-    streak_msg = get_streak_message(streak)
+    streak = get_user_streak(update.effective_chat.id)
 
     text = (
         f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
-        f"🎯 <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
         f"💡 <b>Порада дня</b>\n{content['tip']}\n\n"
         f"🔥 <b>Серія:</b> {streak} дн.\n"
-        f"{streak_msg}"
+        f"{get_streak_message(streak)}"
     )
     await update.effective_message.reply_text(
         text=text,
@@ -526,7 +641,11 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
 
     if is_premium(chat_id):
-        await update.effective_message.reply_text("💎 У тебе вже активний Premium.")
+        await update.effective_message.reply_text(
+            build_premium_text(chat_id),
+            parse_mode=ParseMode.HTML,
+            reply_markup=premium_kb(is_active=True),
+        )
         return
 
     try:
@@ -538,18 +657,11 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    text = (
-        "🚀 <b>Lemberg Coach Premium</b>\n\n"
-        "Що відкривається:\n"
-        "• GPT-коуч 24/7\n"
-        "• персональні відповіді\n"
-        "• майбутні premium-функції\n\n"
-        "Натисни кнопку нижче для безпечної оплати."
+    await update.effective_message.reply_text(
+        build_premium_text(chat_id),
+        parse_mode=ParseMode.HTML,
+        reply_markup=premium_kb(checkout_url=checkout_url),
     )
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)]]
-    )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -558,35 +670,70 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await query.answer()
+    user_id = query.from_user.id
     content = today_content()
+
+    if query.data == "back_menu":
+        await safe_edit_or_send(
+            query,
+            build_main_menu_text(user_id),
+            reply_markup=main_menu_kb(),
+        )
+        return
 
     if query.data == "get_motivation":
         text = f"🧠 <b>Мотивація дня</b>\n\n{content['motivation']}"
-        await query.message.reply_text(text=text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
         return
 
     if query.data == "extra_motivation":
-        extra = get_extra_motivation_for_user(query.from_user.id)
+        extra = get_extra_motivation_for_user(user_id)
         text = f"✨ <b>Імпульс</b>\n\n{extra}"
-        await query.message.reply_text(text=text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
         return
 
     if query.data == "get_task":
-        text = f"🎯 <b>Завдання дня</b>\n\n{content['task']}"
-        await query.message.reply_text(text=text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+        text = f"✅ <b>Завдання дня</b>\n\n{content['task']}"
+        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
         return
 
     if query.data == "get_tip":
         text = f"💡 <b>Порада дня</b>\n\n{content['tip']}"
-        await query.message.reply_text(text=text, parse_mode=ParseMode.HTML, reply_markup=main_menu_kb())
+        await safe_edit_or_send(query, text, reply_markup=back_menu_kb())
         return
 
     if query.data == "upgrade":
-        fake_update = update
-        await upgrade_cmd(fake_update, context)
+        if is_premium(user_id):
+            await safe_edit_or_send(
+                query,
+                build_premium_text(user_id),
+                reply_markup=premium_kb(is_active=True),
+            )
+            return
+
+        try:
+            checkout_url = create_checkout_session(user_id)
+        except Exception as e:
+            log.warning("Stripe checkout session error: %s", e)
+            await safe_edit_or_send(
+                query,
+                "⚠️ Не вдалося створити сторінку оплати. Спробуй ще раз трохи пізніше.",
+                reply_markup=back_menu_kb(),
+            )
+            return
+
+        await safe_edit_or_send(
+            query,
+            build_premium_text(user_id),
+            reply_markup=premium_kb(checkout_url=checkout_url),
+        )
         return
 
-    await query.message.reply_text("Невідома дія. Спробуй ще раз.", reply_markup=main_menu_kb())
+    await safe_edit_or_send(
+        query,
+        "Невідома дія. Спробуй ще раз.",
+        reply_markup=main_menu_kb(),
+    )
 
 
 async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -622,7 +769,7 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     text = (
         f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
-        f"🎯 <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
         f"💡 <b>Порада дня</b>\n{content['tip']}"
     )
 
@@ -667,7 +814,7 @@ async def notify_owner_started(app: Application) -> None:
         log.warning("Owner notify failed: %s", e)
 
 
-# ---------- Stripe webhook ----------
+# ---------- Web ----------
 @app_flask.route("/health", methods=["GET"])
 def health():
     return jsonify({"ok": True}), 200
@@ -717,33 +864,47 @@ def stripe_webhook():
     obj = event["data"]["object"]
 
     if event_type == "checkout.session.completed":
-        client_reference_id = obj.get("client_reference_id")
-        metadata = obj.get("metadata", {}) or {}
-        customer_id = obj.get("customer")
-        subscription_id = obj.get("subscription")
+        client_reference_id = stripe_attr(obj, "client_reference_id", "")
+        metadata = stripe_attr(obj, "metadata", {}) or {}
+        customer_id = stripe_attr(obj, "customer", "")
+        subscription_id = stripe_attr(obj, "subscription", "")
 
-        tg_raw = metadata.get("telegram_user_id") or client_reference_id
+        tg_raw = None
+        try:
+            tg_raw = metadata.get("telegram_user_id")
+        except Exception:
+            tg_raw = None
+
+        tg_raw = tg_raw or client_reference_id
+
         if tg_raw and str(tg_raw).isdigit():
             tg_user_id = int(tg_raw)
+
             set_premium(
                 tg_user_id,
                 True,
-                stripe_customer_id=customer_id or "",
-                stripe_subscription_id=subscription_id or "",
+                stripe_customer_id=str(customer_id or ""),
+                stripe_subscription_id=str(subscription_id or ""),
             )
             log.info("Premium enabled for Telegram user %s", tg_user_id)
 
+            try:
+                asyncio.run(send_premium_activated_message(tg_user_id))
+            except Exception as e:
+                log.warning("Failed to notify premium activation: %s", e)
+
     elif event_type == "customer.subscription.deleted":
-        subscription_id = obj.get("id", "")
+        subscription_id = str(stripe_attr(obj, "id", "") or "")
         tg_user_id = find_user_id_by_subscription(subscription_id)
         if tg_user_id:
             set_premium(tg_user_id, False)
             log.info("Premium disabled for Telegram user %s (subscription deleted)", tg_user_id)
 
     elif event_type == "customer.subscription.updated":
-        subscription_id = obj.get("id", "")
-        status = obj.get("status", "")
+        subscription_id = str(stripe_attr(obj, "id", "") or "")
+        status = str(stripe_attr(obj, "status", "") or "")
         tg_user_id = find_user_id_by_subscription(subscription_id)
+
         if tg_user_id and status not in ("active", "trialing"):
             set_premium(tg_user_id, False)
             log.info("Premium disabled for Telegram user %s (status=%s)", tg_user_id, status)
@@ -757,10 +918,13 @@ def run_web_server() -> None:
 
 # ---------- Main ----------
 def main() -> None:
+    global TG_APP
+
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
     application = Application.builder().token(BOT_TOKEN).build()
+    TG_APP = application
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
