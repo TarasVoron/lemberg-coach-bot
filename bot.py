@@ -72,11 +72,8 @@ stripe.api_key = STRIPE_SECRET_KEY
 app_flask = Flask(__name__)
 TG_APP: Application | None = None
 
-# Антиповтор "ще імпульс"
+# Антиповтор для "Заряд"
 user_last_extra_motivation: dict[int, str] = {}
-
-# Одна активна панель на користувача
-active_panel_message_ids: dict[int, int] = {}
 
 # ---------- Coach request filters ----------
 COACH_KEYWORDS = (
@@ -86,7 +83,9 @@ COACH_KEYWORDS = (
     "завдан", "пріоритет", "результ", "розклад", "ранок", "вечір",
     "рішення", "сумнів", "страх", "дія", "коуч", "звички",
     "вигоран", "прогрес", "цілеспрям", "успіх", "поштовх",
-    "мета", "звичка", "звички", "продуктивність", "організація"
+    "мета", "звичка", "продуктивність", "організація",
+    "поштовх", "заряд", "особистий розвиток", "прогрес",
+    "менше їсти", "самоконтроль", "звички харчування"
 )
 
 OFFTOPIC_PATTERNS = (
@@ -154,13 +153,14 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
+                    "panel_message_id": 0,
                 }
             save_users_data(result)
             return result
 
         if isinstance(data, dict):
             changed = False
-            for uid, user in data.items():
+            for _, user in data.items():
                 defaults = {
                     "streak": 0,
                     "last_seen": "",
@@ -168,6 +168,7 @@ def load_users_data() -> dict:
                     "messages_count": 0,
                     "stripe_customer_id": "",
                     "stripe_subscription_id": "",
+                    "panel_message_id": 0,
                 }
                 for k, v in defaults.items():
                     if k not in user:
@@ -199,16 +200,50 @@ def ensure_user(user_id: int) -> dict:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "panel_message_id": 0,
         }
         save_users_data(data)
 
     return data[uid]
 
 
-def is_premium(user_id: int) -> bool:
+def get_user(user_id: int) -> dict:
+    ensure_user(user_id)
+    data = load_users_data()
+    return data.get(str(user_id), {})
+
+
+def update_user_fields(user_id: int, **fields) -> None:
     data = load_users_data()
     uid = str(user_id)
-    return bool(data.get(uid, {}).get("premium", False))
+
+    if uid not in data:
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+            "panel_message_id": 0,
+        }
+
+    for k, v in fields.items():
+        data[uid][k] = v
+
+    save_users_data(data)
+
+
+def get_panel_message_id(user_id: int) -> int:
+    return int(get_user(user_id).get("panel_message_id", 0) or 0)
+
+
+def set_panel_message_id(user_id: int, message_id: int) -> None:
+    update_user_fields(user_id, panel_message_id=message_id)
+
+
+def is_premium(user_id: int) -> bool:
+    return bool(get_user(user_id).get("premium", False))
 
 
 def set_premium(
@@ -217,26 +252,12 @@ def set_premium(
     stripe_customer_id: str = "",
     stripe_subscription_id: str = "",
 ) -> None:
-    data = load_users_data()
-    uid = str(user_id)
-
-    if uid not in data:
-        data[uid] = {
-            "streak": 0,
-            "last_seen": "",
-            "premium": value,
-            "messages_count": 0,
-            "stripe_customer_id": stripe_customer_id,
-            "stripe_subscription_id": stripe_subscription_id,
-        }
-    else:
-        data[uid]["premium"] = value
-        if stripe_customer_id:
-            data[uid]["stripe_customer_id"] = stripe_customer_id
-        if stripe_subscription_id:
-            data[uid]["stripe_subscription_id"] = stripe_subscription_id
-
-    save_users_data(data)
+    payload = {"premium": value}
+    if stripe_customer_id:
+        payload["stripe_customer_id"] = stripe_customer_id
+    if stripe_subscription_id:
+        payload["stripe_subscription_id"] = stripe_subscription_id
+    update_user_fields(user_id, **payload)
 
 
 def find_user_id_by_subscription(subscription_id: str) -> int | None:
@@ -248,22 +269,8 @@ def find_user_id_by_subscription(subscription_id: str) -> int | None:
 
 
 def increment_message_count(user_id: int) -> None:
-    data = load_users_data()
-    uid = str(user_id)
-
-    if uid not in data:
-        data[uid] = {
-            "streak": 0,
-            "last_seen": "",
-            "premium": False,
-            "messages_count": 1,
-            "stripe_customer_id": "",
-            "stripe_subscription_id": "",
-        }
-    else:
-        data[uid]["messages_count"] = int(data[uid].get("messages_count", 0)) + 1
-
-    save_users_data(data)
+    current = int(get_user(user_id).get("messages_count", 0))
+    update_user_fields(user_id, messages_count=current + 1)
 
 
 def update_user_streak(user_id: int) -> tuple[int, bool]:
@@ -279,6 +286,7 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
             "messages_count": 0,
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
+            "panel_message_id": 0,
         }
         save_users_data(data)
         return 1, False
@@ -308,11 +316,7 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
 
 
 def get_user_streak(user_id: int) -> int:
-    data = load_users_data()
-    uid = str(user_id)
-    if uid not in data:
-        return 0
-    return int(data[uid].get("streak", 0))
+    return int(get_user(user_id).get("streak", 0))
 
 
 def get_subscribed_user_ids() -> list[int]:
@@ -373,17 +377,17 @@ def get_extra_motivation_for_user(user_id: int) -> str:
 def get_streak_message(streak: int) -> str:
     if streak >= 21:
         return "🔥 21 день — ти вже інша людина."
-    elif streak >= 14:
+    if streak >= 14:
         return "⚡ 14 днів — це вже система, не випадковість."
-    elif streak >= 10:
+    if streak >= 10:
         return "💥 10 днів — ти вже небезпечний для своїх старих звичок."
-    elif streak >= 7:
+    if streak >= 7:
         return "🚀 7 днів — ти вже будуєш нову версію себе."
-    elif streak >= 5:
+    if streak >= 5:
         return "📈 5 днів — дисципліна починає працювати."
-    elif streak >= 3:
+    if streak >= 3:
         return "🔥 3 дні — ти вже в ритмі."
-    elif streak >= 1:
+    if streak >= 1:
         return "✨ Початок — це вже більше, ніж у більшості."
     return ""
 
@@ -397,29 +401,53 @@ def get_comeback_message() -> str:
 
 
 # ---------- UI ----------
-def main_menu_kb(is_premium_user: bool) -> InlineKeyboardMarkup:
-    premium_first_row = (
-        [InlineKeyboardButton("💎 Premium активний", callback_data="show_premium")]
-        if is_premium_user
-        else [InlineKeyboardButton("💳 Оформити Premium", callback_data="show_premium")]
+def create_checkout_session(telegram_user_id: int) -> str:
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[
+            {
+                "price": STRIPE_PRICE_ID,
+                "quantity": 1,
+            }
+        ],
+        success_url=f"{APP_BASE_URL}/payment-success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{APP_BASE_URL}/payment-cancelled",
+        client_reference_id=str(telegram_user_id),
+        metadata={"telegram_user_id": str(telegram_user_id)},
+        allow_promotion_codes=True,
     )
+    return session.url
 
-    buttons = [
-        premium_first_row,
+
+def panel_keyboard(user_id: int, panel: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if panel == "premium" and not is_premium(user_id):
+        try:
+            checkout_url = create_checkout_session(user_id)
+            rows.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
+        except Exception as e:
+            log.warning("Failed to create checkout URL for keyboard: %s", e)
+
+    elif is_premium(user_id):
+        rows.append([InlineKeyboardButton("💎 Premium активний", callback_data="view:premium")])
+    else:
+        rows.append([InlineKeyboardButton("🚀 Premium", callback_data="view:premium")])
+
+    rows.extend([
         [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="view:motivation")],
-        [InlineKeyboardButton("✨ Ще імпульс", callback_data="view:extra")],
+        [InlineKeyboardButton("⚡ Заряд", callback_data="view:charge")],
         [InlineKeyboardButton("✅ Завдання дня", callback_data="view:task")],
         [InlineKeyboardButton("💡 Порада дня", callback_data="view:tip")],
         [InlineKeyboardButton("🏠 Головне меню", callback_data="view:menu")],
-    ]
+    ])
 
     if MINI_APP_URL:
-        buttons.append([InlineKeyboardButton("🧭 Відкрити Mini App", url=MINI_APP_URL)])
+        rows.append([InlineKeyboardButton("🧭 Відкрити Mini App", url=MINI_APP_URL)])
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(rows)
 
 
-# ---------- Panel text builders ----------
 def build_menu_text(user_id: int, include_comeback: bool = False) -> str:
     streak = get_user_streak(user_id)
     streak_msg = get_streak_message(streak)
@@ -435,7 +463,7 @@ def build_menu_text(user_id: int, include_comeback: bool = False) -> str:
         + "• 🧠 <b>Мотивацію дня</b>\n"
         + "• ✅ <b>Завдання дня</b>\n"
         + "• 💡 <b>Пораду дня</b>\n"
-        + "• ✨ <b>Імпульс</b>\n\n"
+        + "• ⚡ <b>Заряд</b>\n\n"
         + f"🔥 <b>Твоя серія:</b> {streak} дн.\n"
         + f"{streak_msg}\n\n"
         + "Обери дію нижче або напиши мені повідомлення."
@@ -446,8 +474,8 @@ def build_motivation_text() -> str:
     return f"🧠 <b>Мотивація дня</b>\n\n{get_today_motivation()}"
 
 
-def build_extra_text(user_id: int) -> str:
-    return f"✨ <b>Імпульс</b>\n\n{get_extra_motivation_for_user(user_id)}"
+def build_charge_text(user_id: int) -> str:
+    return f"⚡ <b>Заряд</b>\n\n{get_extra_motivation_for_user(user_id)}"
 
 
 def build_task_text() -> str:
@@ -502,8 +530,8 @@ def build_panel_text(user_id: int, panel: str, include_comeback: bool = False) -
         return build_menu_text(user_id, include_comeback=include_comeback)
     if panel == "motivation":
         return build_motivation_text()
-    if panel == "extra":
-        return build_extra_text(user_id)
+    if panel == "charge":
+        return build_charge_text(user_id)
     if panel == "task":
         return build_task_text()
     if panel == "tip":
@@ -515,14 +543,13 @@ def build_panel_text(user_id: int, panel: str, include_comeback: bool = False) -
     return build_menu_text(user_id)
 
 
-# ---------- Panel renderer ----------
 async def render_panel(user_id: int, panel: str, include_comeback: bool = False) -> None:
     if TG_APP is None:
         return
 
     text = build_panel_text(user_id, panel, include_comeback=include_comeback)
-    markup = main_menu_kb(is_premium(user_id))
-    current_message_id = active_panel_message_ids.get(user_id)
+    markup = panel_keyboard(user_id, panel)
+    current_message_id = get_panel_message_id(user_id)
 
     if current_message_id:
         try:
@@ -543,9 +570,9 @@ async def render_panel(user_id: int, panel: str, include_comeback: bool = False)
                         message_id=current_message_id,
                         reply_markup=markup,
                     )
+                    return
                 except Exception:
                     pass
-                return
 
             log.warning("Panel edit failed for user %s: %s", user_id, e)
 
@@ -555,7 +582,7 @@ async def render_panel(user_id: int, panel: str, include_comeback: bool = False)
         parse_mode=ParseMode.HTML,
         reply_markup=markup,
     )
-    active_panel_message_ids[user_id] = sent.message_id
+    set_panel_message_id(user_id, sent.message_id)
 
 
 # ---------- Request scope ----------
@@ -571,15 +598,12 @@ def is_coach_request(text: str) -> bool:
     if any(k in low for k in COACH_KEYWORDS):
         return True
 
-    # Дозволяємо короткі практичні фрази теж
     short_ok = (
         "поштовх", "мотивація", "мета", "план", "день", "фокус",
-        "звичка", "звички", "дисципліна", "продуктивність"
+        "звичка", "звички", "дисципліна", "продуктивність",
+        "заряд", "ціль"
     )
-    if low in short_ok:
-        return True
-
-    return False
+    return low in short_ok
 
 
 # ---------- GPT ----------
@@ -611,6 +635,8 @@ def ask_gpt(user_text: str) -> str:
                         "Ти НЕ універсальний ChatGPT. "
                         "Ти працюєш тільки як коуч з дисципліни, фокусу, продуктивності, "
                         "звичок, планування дня, особистого прогресу та прийняття рішень. "
+                        "Можеш допомагати з самоконтролем, звичками харчування та режимом, "
+                        "але без медичних діагнозів і без медичних порад. "
                         "Якщо запит виходить за ці межі — коротко поверни розмову в коучинг. "
                         "Будь коротким, конкретним і корисним. "
                         "Не пиши довгі есе. "
@@ -628,25 +654,6 @@ def ask_gpt(user_text: str) -> str:
     except Exception as e:
         log.warning("OpenAI error: %s", e)
         return "⚠️ GPT тимчасово недоступний. Спробуй ще раз трохи пізніше."
-
-
-# ---------- Stripe checkout ----------
-def create_checkout_session(telegram_user_id: int) -> str:
-    session = stripe.checkout.Session.create(
-        mode="subscription",
-        line_items=[
-            {
-                "price": STRIPE_PRICE_ID,
-                "quantity": 1,
-            }
-        ],
-        success_url=f"{APP_BASE_URL}/payment-success?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{APP_BASE_URL}/payment-cancelled",
-        client_reference_id=str(telegram_user_id),
-        metadata={"telegram_user_id": str(telegram_user_id)},
-        allow_promotion_codes=True,
-    )
-    return session.url
 
 
 def stripe_attr(obj, key: str, default=None):
@@ -685,7 +692,7 @@ async def send_premium_activated_message(user_id: int):
         log.warning("Failed to send premium activation message to %s: %s", user_id, e)
 
     try:
-        await render_panel(user_id, "premium")
+        await render_panel(user_id, "menu")
     except Exception as e:
         log.warning("Failed to refresh panel after premium activation: %s", e)
 
@@ -708,9 +715,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
+    if not update.effective_chat or not update.effective_message:
         return
-    await render_panel(update.effective_chat.id, "menu")
+    now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
+    await update.effective_message.reply_text(f"✅ Пінг! {now} (Europe/Berlin)")
 
 
 async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -739,53 +747,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     user_id = query.from_user.id
     data = query.data or ""
-
-    if data == "show_premium":
-        if not is_premium(user_id):
-            try:
-                checkout_url = create_checkout_session(user_id)
-
-                # Спочатку оновлюємо панель у Premium стан
-                text = build_premium_text(user_id)
-                markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)],
-                    [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="view:motivation")],
-                    [InlineKeyboardButton("✨ Ще імпульс", callback_data="view:extra")],
-                    [InlineKeyboardButton("✅ Завдання дня", callback_data="view:task")],
-                    [InlineKeyboardButton("💡 Порада дня", callback_data="view:tip")],
-                    [InlineKeyboardButton("🏠 Головне меню", callback_data="view:menu")],
-                ])
-
-                msg_id = active_panel_message_ids.get(user_id)
-                if msg_id:
-                    try:
-                        await TG_APP.bot.edit_message_text(
-                            chat_id=user_id,
-                            message_id=msg_id,
-                            text=text,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=markup,
-                        )
-                        return
-                    except Exception as e:
-                        log.warning("Premium panel edit failed: %s", e)
-
-                sent = await TG_APP.bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
-                )
-                active_panel_message_ids[user_id] = sent.message_id
-                return
-
-            except Exception as e:
-                log.warning("Stripe checkout session error: %s", e)
-                await render_panel(user_id, "menu")
-                return
-
-        await render_panel(user_id, "premium")
-        return
 
     if data.startswith("view:"):
         panel = data.split(":", 1)[1]
@@ -841,13 +802,24 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # ---------- Scheduler ----------
 async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
+    content = today_content()
     users = get_subscribed_user_ids()
     if not users:
         return
 
+    text = (
+        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
+        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"💡 <b>Порада дня</b>\n{content['tip']}"
+    )
+
     for uid in users:
         try:
-            await render_panel(uid, "today")
+            await context.bot.send_message(
+                chat_id=uid,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
         except Exception as e:
             log.warning("Failed to send daily push to %s: %s", uid, e)
 
