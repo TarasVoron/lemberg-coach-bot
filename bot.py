@@ -587,37 +587,25 @@ async def render_panel(user_id: int, panel: str, include_comeback: bool = False)
 
 # ---------- Request scope ----------
 def is_coach_request(text: str) -> bool:
-    low = (text or "").strip().lower()
+    text = text.lower()
 
-    if not low:
-        return False
+    blocked_keywords = [
+        "код", "python", "javascript", "програмування",
+        "курс валют", "погода", "новини",
+        "переклади", "translate", "википедия"
+    ]
 
-    if any(p in low for p in OFFTOPIC_PATTERNS):
-        return False
+    for word in blocked_keywords:
+        if word in text:
+            return False
 
-    if any(k in low for k in COACH_KEYWORDS):
-        return True
-
-    short_ok = (
-        "поштовх", "мотивація", "мета", "план", "день", "фокус",
-        "звичка", "звички", "дисципліна", "продуктивність",
-        "заряд", "ціль"
-    )
-    return low in short_ok
+    return True
 
 
 # ---------- GPT ----------
 def ask_gpt(user_text: str) -> str:
     if not is_coach_request(user_text):
-        return (
-            "Я тут не як універсальний ChatGPT.\n\n"
-            "Я працюю як коуч для:\n"
-            "• дисципліни\n"
-            "• фокусу\n"
-            "• планування дня\n"
-            "• звичок\n"
-            "• особистого прогресу\n\n"
-            "Опиши словами свою ціль, проблему або день, який хочеш зібрати — і я допоможу."
+        return "Я працюю як AI-коуч для дії. Напиши свою ціль або проблему — і я допоможу."
         )
 
     try:
