@@ -36,7 +36,6 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
-
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "8"))
 EVENING_HOUR = int(os.getenv("EVENING_HOUR", "20"))
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
@@ -78,6 +77,94 @@ TG_APP: Application | None = None
 # Антиповтор для "Заряд"
 user_last_extra_motivation: dict[int, str] = {}
 
+# ---------- Time helpers ----------
+def now_berlin() -> datetime:
+    return datetime.now(BERLIN)
+
+
+def today_str() -> str:
+    return now_berlin().date().isoformat()
+
+
+def dt_to_str(value: datetime) -> str:
+    return value.isoformat()
+
+
+def dt_from_str(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=BERLIN)
+        return dt.astimezone(BERLIN)
+    except Exception:
+        return None
+
+
+def parse_date(value: str) -> date:
+    return date.fromisoformat(value)
+
+
+# ---------- Coach request filters ----------
+OFFTOPIC_BLOCKED = [
+    "код",
+    "python",
+    "javascript",
+    "програмування",
+    "курс валют",
+    "погода",
+    "новини",
+    "переклади",
+    "translate",
+    "википедия",
+    "вікіпедія",
+    "що це",
+    "what is this",
+    "who is this",
+    "намалюй",
+    "створи картинку",
+]
+
+
+def is_coach_request(text: str) -> bool:
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+
+    for word in OFFTOPIC_BLOCKED:
+        if word in low:
+            return False
+
+    return True
+
+
+def detect_coach_mode(user_text: str) -> str:
+    low = (user_text or "").lower()
+
+    soft_markers = [
+        "втомився", "втомилась", "не маю сили", "нема сил", "вигорів", "вигоріла",
+        "вигорання", "тривога", "страшно", "не вивожу", "мені важко",
+        "не можу зібратись", "не можу зібратися", "розгубився", "розгубилась",
+        "опускаються руки", "зневірився", "зневірилась",
+    ]
+
+    push_markers = [
+        "відкладаю", "прокрастиную", "злив день", "знову не зробив", "лінь",
+        "лінуюсь", "лінився", "розмазався", "розфокус", "завис", "тягну час",
+        "уникаю", "саботаж", "саботую",
+    ]
+
+    for marker in soft_markers:
+        if marker in low:
+            return "soft"
+
+    for marker in push_markers:
+        if marker in low:
+            return "push"
+
+    return "focus"
+
 
 # ---------- Data helpers ----------
 def load_json_list(path: Path, fallback: list[str]) -> list[str]:
@@ -95,7 +182,7 @@ def load_json_dict(path: Path, fallback: dict) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if isinstance(data, dict) and data:
+            if isinstance(data, dict):
                 return data
     except Exception as e:
         log.warning("Failed to load %s: %s", path.name, e)
@@ -105,100 +192,37 @@ def load_json_dict(path: Path, fallback: dict) -> dict:
 def load_motivations() -> list[str]:
     return load_json_list(
         MOTIVATIONS_PATH,
-        ["Твоя проблема зараз не в мотивації, а в відсутності одного чіткого кроку. Визнач його."]
+        ["Сьогодні твоя сила — просто не зупинятися."]
     )
 
 
 def load_tasks() -> list[str]:
     return load_json_list(
         TASKS_PATH,
-        ["Не думай про весь шлях. Обери одну конкретну справу і закрий її сьогодні."]
+        ["Зроби одну маленьку, але корисну дію для свого майбутнього."]
     )
 
 
 def load_tips() -> list[str]:
     return load_json_list(
         TIPS_PATH,
-        ["Не шукай ідеальний день. Збери цей день і зроби одну правильну дію."]
+        ["Краще маленький прогрес, ніж велике відкладання."]
     )
 
 
-def load_followups() -> dict[str, list[str]]:
-    fallback = {
-        "after_task_2h": [
-            "⏱ Минуло трохи часу. Ти вже почав ту дію, яку визначив?",
-            "⏱ Я повертаю тебе в дію. Що вже зроблено по твоїй задачі?",
-            "⏱ Не зливай імпульс. Ти вже рушив чи ще стоїш?"
-        ],
-        "after_task_4h": [
-            "⚡ Другий дотик. Є прогрес чи ти знову відклав?",
-            "⚡ Чесно: що вже зроблено по задачі?",
-            "⚡ Якщо ще не почав — зроби мінімум прямо зараз. Яка буде дія?"
-        ],
-        "evening_check": [
-            "🌙 Вечірній check-in. Ти закрив сьогодні головну задачу чи ні?",
-            "🌙 Підсумок дня: що ти реально зробив сьогодні?",
-            "🌙 Не прикрашай. Який один результат дня ти можеш назвати?"
-        ],
-        "churn_1d": [
-            "👀 Ти зник на день. Не зливай ритм. Яка твоя одна дія сьогодні?",
-            "👀 Пауза — не проблема. Зникнути надовго — проблема. З чого повертаєшся сьогодні?",
-        ],
-        "churn_3d": [
-            "⚠️ Ти випав з ритму вже на кілька днів. Поверни контроль. Яка одна дія сьогодні?",
-            "⚠️ Зараз не час думати широко. Назви одну задачу, яку ти реально закриєш сьогодні.",
-        ],
-        "churn_7d": [
-            "🔥 Ти надто довго поза ритмом. Повернення починається з одного кроку. Що робиш сьогодні?",
-            "🔥 Стоп. Без самокритики. Просто назви одну дію і виконай її сьогодні.",
-        ],
-    }
-    return load_json_dict(FOLLOWUPS_PATH, fallback)
-
-
-def today_str() -> str:
-    return datetime.now(BERLIN).date().isoformat()
-
-
-def parse_date(value: str) -> date:
-    return date.fromisoformat(value)
-
-
-def now_berlin() -> datetime:
-    return datetime.now(BERLIN)
-
-
-def dt_to_str(dt: datetime) -> str:
-    return dt.isoformat()
-
-
-def parse_dt(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-
-def default_user_payload() -> dict:
-    return {
-        "streak": 0,
-        "last_seen": "",
-        "premium": False,
-        "messages_count": 0,
-        "stripe_customer_id": "",
-        "stripe_subscription_id": "",
-        "panel_message_id": 0,
-        "pending_task": "",
-        "followup_due_at": "",
-        "followup_type": "",
-        "followup_sent": False,
-        "awaiting_task_answer": False,
-        "last_user_message_at": "",
-        "last_churn_sent_at": "",
-        "last_churn_type": "",
-    }
+def load_followups() -> dict:
+    return load_json_dict(
+        FOLLOWUPS_PATH,
+        {
+            "after_task_2h": ["Що по твоїй задачі?"],
+            "after_task_4h": ["Що вже зроблено по задачі?"],
+            "evening_check": ["Підсумок дня: що ти реально зробив сьогодні?"],
+            "no_response": ["Я не отримав відповіді. Що зробиш прямо зараз?"],
+            "churn_1d": ["Ти зник на день. Яка твоя одна дія сьогодні?"],
+            "churn_3d": ["Ти випав з ритму. Яка одна задача сьогодні найважливіша?"],
+            "churn_7d": ["Повернення починається з одного кроку. Що робиш сьогодні?"],
+        },
+    )
 
 
 def load_users_data() -> dict:
@@ -209,17 +233,49 @@ def load_users_data() -> dict:
         if isinstance(data, list):
             result = {}
             today = today_str()
+            now = dt_to_str(now_berlin())
             for user_id in data:
-                payload = default_user_payload()
-                payload["streak"] = 1
-                payload["last_seen"] = today
-                result[str(user_id)] = payload
+                result[str(user_id)] = {
+                    "streak": 1,
+                    "last_seen": today,
+                    "last_interaction_at": now,
+                    "premium": False,
+                    "messages_count": 0,
+                    "stripe_customer_id": "",
+                    "stripe_subscription_id": "",
+                    "panel_message_id": 0,
+                    "pending_task": "",
+                    "followup_due_at": "",
+                    "followup_type": "",
+                    "followup_sent": False,
+                    "awaiting_task_answer": False,
+                    "last_evening_check_date": "",
+                    "last_churn_stage": "",
+                    "last_churn_sent_at": "",
+                }
             save_users_data(result)
             return result
 
         if isinstance(data, dict):
             changed = False
-            defaults = default_user_payload()
+            defaults = {
+                "streak": 0,
+                "last_seen": "",
+                "last_interaction_at": "",
+                "premium": False,
+                "messages_count": 0,
+                "stripe_customer_id": "",
+                "stripe_subscription_id": "",
+                "panel_message_id": 0,
+                "pending_task": "",
+                "followup_due_at": "",
+                "followup_type": "",
+                "followup_sent": False,
+                "awaiting_task_answer": False,
+                "last_evening_check_date": "",
+                "last_churn_stage": "",
+                "last_churn_sent_at": "",
+            }
             for _, user in data.items():
                 for k, v in defaults.items():
                     if k not in user:
@@ -244,7 +300,24 @@ def ensure_user(user_id: int) -> dict:
     uid = str(user_id)
 
     if uid not in data:
-        data[uid] = default_user_payload()
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "last_interaction_at": "",
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+            "panel_message_id": 0,
+            "pending_task": "",
+            "followup_due_at": "",
+            "followup_type": "",
+            "followup_sent": False,
+            "awaiting_task_answer": False,
+            "last_evening_check_date": "",
+            "last_churn_stage": "",
+            "last_churn_sent_at": "",
+        }
         save_users_data(data)
 
     return data[uid]
@@ -261,12 +334,38 @@ def update_user_fields(user_id: int, **fields) -> None:
     uid = str(user_id)
 
     if uid not in data:
-        data[uid] = default_user_payload()
+        data[uid] = {
+            "streak": 0,
+            "last_seen": "",
+            "last_interaction_at": "",
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+            "panel_message_id": 0,
+            "pending_task": "",
+            "followup_due_at": "",
+            "followup_type": "",
+            "followup_sent": False,
+            "awaiting_task_answer": False,
+            "last_evening_check_date": "",
+            "last_churn_stage": "",
+            "last_churn_sent_at": "",
+        }
 
     for k, v in fields.items():
         data[uid][k] = v
 
     save_users_data(data)
+
+
+def mark_interaction(user_id: int) -> None:
+    update_user_fields(
+        user_id,
+        last_interaction_at=dt_to_str(now_berlin()),
+        last_churn_stage="",
+        last_churn_sent_at="",
+    )
 
 
 def get_panel_message_id(user_id: int) -> int:
@@ -311,13 +410,27 @@ def increment_message_count(user_id: int) -> None:
 def update_user_streak(user_id: int) -> tuple[int, bool]:
     data = load_users_data()
     uid = str(user_id)
-    today = datetime.now(BERLIN).date()
+    today = now_berlin().date()
 
     if uid not in data:
-        payload = default_user_payload()
-        payload["streak"] = 1
-        payload["last_seen"] = today.isoformat()
-        data[uid] = payload
+        data[uid] = {
+            "streak": 1,
+            "last_seen": today.isoformat(),
+            "last_interaction_at": dt_to_str(now_berlin()),
+            "premium": False,
+            "messages_count": 0,
+            "stripe_customer_id": "",
+            "stripe_subscription_id": "",
+            "panel_message_id": 0,
+            "pending_task": "",
+            "followup_due_at": "",
+            "followup_type": "",
+            "followup_sent": False,
+            "awaiting_task_answer": False,
+            "last_evening_check_date": "",
+            "last_churn_stage": "",
+            "last_churn_sent_at": "",
+        }
         save_users_data(data)
         return 1, False
 
@@ -340,6 +453,7 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
 
     user["streak"] = streak
     user["last_seen"] = today.isoformat()
+    user["last_interaction_at"] = dt_to_str(now_berlin())
     data[uid] = user
     save_users_data(data)
     return streak, lost
@@ -356,7 +470,7 @@ def get_subscribed_user_ids() -> list[int]:
 
 def get_day_index() -> int:
     base = datetime(2025, 1, 1, tzinfo=BERLIN)
-    now = datetime.now(BERLIN)
+    now = now_berlin()
     return (now.date() - base.date()).days
 
 
@@ -386,7 +500,7 @@ def today_content() -> dict[str, str]:
 def get_extra_motivation_for_user(user_id: int) -> str:
     items = load_motivations()
     if not items:
-        return "Ти зараз не зібраний, бо не визначив один чіткий крок. Визнач його."
+        return "Рухайся вперед."
 
     if len(items) == 1:
         result = items[0]
@@ -411,6 +525,30 @@ def get_random_followup(kind: str) -> str:
     return random.choice(items)
 
 
+def is_actionable_user_text(text: str) -> bool:
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+
+    action_markers = [
+        "зроблю",
+        "почну",
+        "починаю",
+        "сьогодні",
+        "моя задача",
+        "моя дія",
+        "планую",
+        "буду робити",
+        "хочу зробити",
+        "потрібно",
+        "треба",
+        "зараз зроблю",
+        "перша дія",
+        "моє завдання",
+    ]
+    return any(marker in low for marker in action_markers)
+
+
 def save_task_followup(
     user_id: int,
     task_text: str,
@@ -420,7 +558,7 @@ def save_task_followup(
     due_at = now_berlin() + timedelta(hours=delay_hours)
     update_user_fields(
         user_id,
-        pending_task=task_text,
+        pending_task=task_text.strip(),
         followup_due_at=dt_to_str(due_at),
         followup_type=followup_type,
         followup_sent=False,
@@ -445,10 +583,12 @@ async def send_followup(user_id: int, kind: str) -> None:
 
     user = get_user(user_id)
     pending_task = user.get("pending_task", "").strip()
+    base_text = get_random_followup(kind)
 
-    text = get_random_followup(kind)
-    if pending_task:
-        text += f"\n\n🎯 <b>Твоя задача:</b> {pending_task}"
+    if kind in ("after_task_2h", "after_task_4h") and pending_task:
+        text = f"{base_text}\n\n🎯 <b>Твоя задача:</b> {pending_task}"
+    else:
+        text = base_text
 
     try:
         await TG_APP.bot.send_message(
@@ -466,102 +606,73 @@ async def send_followup(user_id: int, kind: str) -> None:
 
 
 async def check_followups(context: ContextTypes.DEFAULT_TYPE) -> None:
-    now = now_berlin()
     users = get_subscribed_user_ids()
+    now = now_berlin()
 
-    for uid in users:
-        user = get_user(uid)
-
-        due_at_raw = user.get("followup_due_at", "")
+    for user_id in users:
+        user = get_user(user_id)
+        due_raw = user.get("followup_due_at", "")
         followup_type = user.get("followup_type", "")
         followup_sent = bool(user.get("followup_sent", False))
 
-        if not due_at_raw or not followup_type or followup_sent:
+        if not due_raw or not followup_type or followup_sent:
             continue
 
-        due_at = parse_dt(due_at_raw)
-        if due_at is None:
+        due_at = dt_from_str(due_raw)
+        if not due_at:
             continue
 
         if now >= due_at:
-            await send_followup(uid, followup_type)
-
-            if followup_type == "after_task_2h":
-                next_due = now + timedelta(hours=2)
-                update_user_fields(
-                    uid,
-                    followup_due_at=dt_to_str(next_due),
-                    followup_type="after_task_4h",
-                    followup_sent=False,
-                )
-            else:
-                update_user_fields(
-                    uid,
-                    followup_due_at="",
-                    followup_type="",
-                    followup_sent=True,
-                )
+            await send_followup(user_id, followup_type)
 
 
-async def evening_checkin(context: ContextTypes.DEFAULT_TYPE) -> None:
-    users = get_subscribed_user_ids()
-    for uid in users:
-        try:
-            await send_followup(uid, "evening_check")
-        except Exception as e:
-            log.warning("Failed evening check-in to %s: %s", uid, e)
-
-
-async def check_anti_churn(context: ContextTypes.DEFAULT_TYPE) -> None:
+# ---------- Anti-churn helpers ----------
+async def send_anti_churn(user_id: int, kind: str) -> None:
     if TG_APP is None:
         return
 
-    now = now_berlin()
+    text = get_random_followup(kind)
+    try:
+        await TG_APP.bot.send_message(
+            chat_id=user_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+        )
+        update_user_fields(
+            user_id,
+            last_churn_stage=kind,
+            last_churn_sent_at=dt_to_str(now_berlin()),
+        )
+    except Exception as e:
+        log.warning("Failed to send anti-churn to %s: %s", user_id, e)
+
+
+async def check_anti_churn(context: ContextTypes.DEFAULT_TYPE) -> None:
     users = get_subscribed_user_ids()
+    now = now_berlin()
 
-    for uid in users:
-        user = get_user(uid)
-        last_msg_raw = user.get("last_user_message_at", "")
-        if not last_msg_raw:
+    for user_id in users:
+        user = get_user(user_id)
+        last_interaction_raw = user.get("last_interaction_at", "")
+        if not last_interaction_raw:
             continue
 
-        last_msg_dt = parse_dt(last_msg_raw)
-        if last_msg_dt is None:
+        last_interaction = dt_from_str(last_interaction_raw)
+        if not last_interaction:
             continue
 
-        diff = now - last_msg_dt
-        kind = ""
+        delta = now - last_interaction
+        last_stage = user.get("last_churn_stage", "")
 
-        if diff >= timedelta(days=7):
-            kind = "churn_7d"
-        elif diff >= timedelta(days=3):
-            kind = "churn_3d"
-        elif diff >= timedelta(days=1):
-            kind = "churn_1d"
-        else:
-            continue
-
-        last_churn_type = user.get("last_churn_type", "")
-        last_churn_sent_at = parse_dt(user.get("last_churn_sent_at", ""))
-
-        if last_churn_type == kind and last_churn_sent_at and (now - last_churn_sent_at) < timedelta(hours=20):
-            continue
-
-        text = get_random_followup(kind)
-
-        try:
-            await TG_APP.bot.send_message(
-                chat_id=uid,
-                text=text,
-                parse_mode=ParseMode.HTML,
-            )
-            update_user_fields(
-                uid,
-                last_churn_type=kind,
-                last_churn_sent_at=dt_to_str(now),
-            )
-        except Exception as e:
-            log.warning("Failed anti-churn to %s: %s", uid, e)
+        if delta >= timedelta(days=7):
+            if last_stage != "churn_7d":
+                await send_anti_churn(user_id, "churn_7d")
+        elif delta >= timedelta(days=3):
+            if last_stage not in ("churn_3d", "churn_7d"):
+                await send_anti_churn(user_id, "churn_3d")
+        elif delta >= timedelta(days=1):
+            if last_stage not in ("churn_1d", "churn_3d", "churn_7d"):
+                await send_anti_churn(user_id, "churn_1d")
 
 
 # ---------- Streak messaging ----------
@@ -591,16 +702,11 @@ def get_comeback_message() -> str:
     )
 
 
-# ---------- UI ----------
+# ---------- Stripe checkout ----------
 def create_checkout_session(telegram_user_id: int) -> str:
     session = stripe.checkout.Session.create(
         mode="subscription",
-        line_items=[
-            {
-                "price": STRIPE_PRICE_ID,
-                "quantity": 1,
-            }
-        ],
+        line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
         success_url=f"{APP_BASE_URL}/payment-success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{APP_BASE_URL}/payment-cancelled",
         client_reference_id=str(telegram_user_id),
@@ -610,6 +716,22 @@ def create_checkout_session(telegram_user_id: int) -> str:
     return session.url
 
 
+def stripe_attr(obj, key: str, default=None):
+    if obj is None:
+        return default
+    try:
+        value = getattr(obj, key)
+        return default if value is None else value
+    except Exception:
+        pass
+    try:
+        value = obj[key]
+        return default if value is None else value
+    except Exception:
+        return default
+
+
+# ---------- UI ----------
 def panel_keyboard(user_id: int, panel: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -619,7 +741,6 @@ def panel_keyboard(user_id: int, panel: str) -> InlineKeyboardMarkup:
             rows.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
         except Exception as e:
             log.warning("Failed to create checkout URL for keyboard: %s", e)
-
     elif is_premium(user_id):
         rows.append([InlineKeyboardButton("💎 Premium активний", callback_data="view:premium")])
     else:
@@ -639,6 +760,13 @@ def panel_keyboard(user_id: int, panel: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def quick_daily_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Відкрити меню", callback_data="view:menu")],
+        [InlineKeyboardButton("⚡ Заряд", callback_data="view:charge")],
+    ])
+
+
 def build_menu_text(user_id: int, include_comeback: bool = False) -> str:
     streak = get_user_streak(user_id)
     streak_msg = get_streak_message(streak)
@@ -649,7 +777,7 @@ def build_menu_text(user_id: int, include_comeback: bool = False) -> str:
         comeback
         + premium_badge
         + "👋 <b>Lemberg Coach</b>\n\n"
-        + "Я — <b>AI-коуч для дії</b>.\n\n"
+        + "Я — AI-коуч для дії.\n\n"
         + "Допомагаю:\n"
         + "• розкласти ціль на кроки\n"
         + "• зібрати план на день\n"
@@ -783,28 +911,36 @@ async def render_panel(user_id: int, panel: str, include_comeback: bool = False)
     set_panel_message_id(user_id, sent.message_id)
 
 
-# ---------- Request scope ----------
-def is_coach_request(text: str) -> bool:
-    text = text.lower().strip()
-
-    blocked_keywords = [
-        "код", "python", "javascript", "програмування",
-        "курс валют", "погода", "новини",
-        "переклади", "translate", "википедия", "вікіпедія",
-        "намалюй", "створи картинку", "що це", "опиши фото"
-    ]
-
-    for word in blocked_keywords:
-        if word in text:
-            return False
-
-    return True
-
-
 # ---------- GPT ----------
 def ask_gpt(user_text: str) -> str:
     if not is_coach_request(user_text):
         return "Я працюю як AI-коуч для дії. Напиши свою ціль або проблему — і я допоможу."
+
+    mode = detect_coach_mode(user_text)
+
+    if mode == "soft":
+        style_block = (
+            "РЕЖИМ SOFT:\n"
+            "- Будь м'якшим і спокійнішим.\n"
+            "- Не тисни жорстко.\n"
+            "- Дай людині відчути опору.\n"
+            "- Все одно веди до 1 маленької дії.\n"
+        )
+    elif mode == "push":
+        style_block = (
+            "РЕЖИМ PUSH:\n"
+            "- Говори коротко, прямо і жорсткіше.\n"
+            "- Не будь грубим, але не сюсюкайся.\n"
+            "- Покажи людині, де вона себе зливає.\n"
+            "- Веди до 1 конкретної дії прямо зараз.\n"
+        )
+    else:
+        style_block = (
+            "РЕЖИМ FOCUS:\n"
+            "- Говори чітко і зібрано.\n"
+            "- Допоможи звузити хаос до 1 головної задачі.\n"
+            "- Веди до конкретного кроку.\n"
+        )
 
     try:
         response = client.chat.completions.create(
@@ -818,32 +954,21 @@ def ask_gpt(user_text: str) -> str:
                         "Ти персональний AI-коуч Lemberg Coach.\n"
                         "Відповідай українською мовою.\n"
                         "Звертайся до користувача на 'ти'.\n\n"
-
                         "Твоя роль — НЕ давати загальні поради, а зрушувати людину в дію.\n\n"
-
+                        f"{style_block}\n"
                         "ПРАВИЛА:\n"
                         "- Не давай списки з інтернету.\n"
-                        "- Не перетворюйся на енциклопедію.\n"
+                        "- Не пиши як енциклопедія.\n"
                         "- Фокусуйся на 1 конкретній дії.\n"
-                        "- Часто став 1 сильне уточнююче питання.\n"
-                        "- Іноді говори прямо, але без грубості.\n"
-                        "- Не розмазуй відповідь.\n"
-                        "- Не йди в абстракцію.\n"
-                        "- Твоя мета — допомогти людині зробити наступний крок.\n\n"
-
+                        "- Часто став 1 уточнююче питання.\n"
+                        "- Якщо людина розгублена — звужуй до одного кроку.\n"
+                        "- Якщо людина вже має напрям — допоможи визначити наступний конкретний крок.\n\n"
                         "СТРУКТУРА ВІДПОВІДІ:\n"
-                        "1. Коротко скажи, що зараз відбувається з людиною\n"
+                        "1. Коротко віддзеркаль, що зараз з людиною\n"
                         "2. Дай 1 конкретну дію\n"
-                        "3. Задай 1 питання\n\n"
-
-                        "ПРИКЛАД СТИЛЮ:\n"
-                        "Ти зараз не зібраний, бо в тебе немає однієї головної задачі.\n"
-                        "Назви її.\n"
-                        "Що для тебе зараз №1?\n\n"
-
-                        "Будь коротким, конкретним і енергійним.\n"
-                        "Не пиши довгі відповіді.\n"
-                        "Максимум 3–5 речень."
+                        "3. Постав 1 питання\n\n"
+                        "Максимум 3–5 речень.\n"
+                        "Будь конкретним, енергійним і живим.\n"
                     ),
                 },
                 {"role": "user", "content": user_text},
@@ -853,21 +978,6 @@ def ask_gpt(user_text: str) -> str:
     except Exception as e:
         log.warning("OpenAI error: %s", e)
         return "⚠️ GPT тимчасово недоступний. Спробуй ще раз пізніше."
-
-
-def stripe_attr(obj, key: str, default=None):
-    if obj is None:
-        return default
-    try:
-        value = getattr(obj, key)
-        return default if value is None else value
-    except Exception:
-        pass
-    try:
-        value = obj[key]
-        return default if value is None else value
-    except Exception:
-        return default
 
 
 # ---------- Premium notify ----------
@@ -904,37 +1014,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     _, lost = update_user_streak(chat_id)
     ensure_user(chat_id)
+    mark_interaction(chat_id)
     await render_panel(chat_id, "menu", include_comeback=lost)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
+    mark_interaction(update.effective_chat.id)
     await render_panel(update.effective_chat.id, "menu")
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.effective_message:
         return
-    now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
+    mark_interaction(update.effective_chat.id)
+    now = now_berlin().strftime("%Y-%m-%d %H:%M:%S")
     await update.effective_message.reply_text(f"✅ Пінг! {now} (Europe/Berlin)")
 
 
 async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
+    mark_interaction(update.effective_chat.id)
     await render_panel(update.effective_chat.id, "menu")
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
+    mark_interaction(update.effective_chat.id)
     await render_panel(update.effective_chat.id, "today")
 
 
 async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
+    mark_interaction(update.effective_chat.id)
     await render_panel(update.effective_chat.id, "premium")
 
 
@@ -947,6 +1063,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = query.from_user.id
     data = query.data or ""
 
+    mark_interaction(user_id)
+
     if data.startswith("view:"):
         panel = data.split(":", 1)[1]
         await render_panel(user_id, panel)
@@ -956,8 +1074,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message:
+    if not update.effective_message or not update.effective_chat:
         return
+
+    mark_interaction(update.effective_chat.id)
 
     await update.effective_message.reply_text(
         "📷 Я поки не аналізую фото в цьому боті.\n\n"
@@ -966,8 +1086,10 @@ async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def unsupported_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_message:
+    if not update.effective_message or not update.effective_chat:
         return
+
+    mark_interaction(update.effective_chat.id)
 
     await update.effective_message.reply_text(
         "🎤 Голосові я поки не аналізую.\n\n"
@@ -986,7 +1108,7 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     ensure_user(user_id)
-    update_user_fields(user_id, last_user_message_at=dt_to_str(now_berlin()))
+    mark_interaction(user_id)
 
     if not is_premium(user_id):
         await update.effective_message.reply_text(
@@ -996,31 +1118,16 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     user = get_user(user_id)
-    if user.get("awaiting_task_answer", False):
+    if bool(user.get("awaiting_task_answer", False)):
         clear_task_followup(user_id)
 
     increment_message_count(user_id)
     reply = ask_gpt(text)
     await update.effective_message.reply_text(reply)
 
-    low = text.lower()
-    trigger_phrases = (
-        "план на день",
-        "дай план",
-        "що робити",
-        "не можу зібратись",
-        "не можу зібратися",
-        "мені важко почати",
-        "дай дію",
-        "з чого почати",
-        "я не можу зібратись",
-        "я не можу зібратися",
-        "я не можу почати",
-    )
-
-    if any(p in low for p in trigger_phrases):
+    if is_actionable_user_text(text):
         save_task_followup(
-            user_id,
+            user_id=user_id,
             task_text=text,
             delay_hours=2,
             followup_type="after_task_2h",
@@ -1029,64 +1136,84 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # ---------- Scheduler ----------
 async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
+    content = today_content()
     users = get_subscribed_user_ids()
     if not users:
         return
 
+    text = (
+        f"🧠 <b>Мотивація дня</b>\n{content['motivation']}\n\n"
+        f"✅ <b>Завдання дня</b>\n{content['task']}\n\n"
+        f"💡 <b>Порада дня</b>\n{content['tip']}"
+    )
+
     for uid in users:
         try:
-            await render_panel(uid, "today")
+            await context.bot.send_message(
+                chat_id=uid,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=quick_daily_kb(),
+            )
         except Exception as e:
             log.warning("Failed to send daily push to %s: %s", uid, e)
 
 
+async def evening_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+    today = today_str()
+    users = get_subscribed_user_ids()
+
+    for uid in users:
+        if not is_premium(uid):
+            continue
+
+        user = get_user(uid)
+        if user.get("last_evening_check_date") == today:
+            continue
+
+        try:
+            text = get_random_followup("evening_check")
+            await context.bot.send_message(
+                chat_id=uid,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=quick_daily_kb(),
+            )
+            update_user_fields(uid, last_evening_check_date=today)
+        except Exception as e:
+            log.warning("Failed to send evening check to %s: %s", uid, e)
+
+
 def schedule_jobs(app: Application) -> None:
-    morning_time = datetime.now(BERLIN).replace(
+    if app.job_queue is None:
+        log.warning("JobQueue is not available. Jobs were not scheduled.")
+        return
+
+    daily_time = now_berlin().replace(
         hour=DAILY_HOUR,
         minute=0,
         second=0,
         microsecond=0,
     ).timetz()
 
-    evening_time = datetime.now(BERLIN).replace(
+    evening_time = now_berlin().replace(
         hour=EVENING_HOUR,
         minute=0,
         second=0,
         microsecond=0,
     ).timetz()
 
-    if app.job_queue is None:
-        log.warning("JobQueue is not available. Jobs were not scheduled.")
-        return
-
-    app.job_queue.run_daily(daily_push, time=morning_time, name="daily_push_berlin")
-
-    app.job_queue.run_daily(
-        evening_checkin,
-        time=evening_time,
-        name="evening_checkin_berlin",
-    )
-
-    app.job_queue.run_repeating(
-        check_followups,
-        interval=300,
-        first=60,
-        name="check_followups",
-    )
-
-    app.job_queue.run_repeating(
-        check_anti_churn,
-        interval=3600,
-        first=120,
-        name="check_anti_churn",
-    )
+    app.job_queue.run_daily(daily_push, time=daily_time, name="daily_push_berlin")
+    app.job_queue.run_daily(evening_check, time=evening_time, name="evening_check_berlin")
+    app.job_queue.run_repeating(check_followups, interval=600, first=30, name="check_followups")
+    app.job_queue.run_repeating(check_anti_churn, interval=1800, first=60, name="check_anti_churn")
 
 
 async def notify_owner_started(app: Application) -> None:
     if not OWNER_ID:
         return
     try:
-        now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
+        now = now_berlin().strftime("%Y-%m-%d %H:%M:%S")
         await app.bot.send_message(
             chat_id=OWNER_ID,
             text=f"✅ BOT запущений ({now}, Europe/Berlin).",
@@ -1205,7 +1332,12 @@ def main() -> None:
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(notify_owner_started)
+        .build()
+    )
     TG_APP = application
 
     application.add_handler(CommandHandler("start", start))
@@ -1220,7 +1352,6 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_with_coach))
 
     schedule_jobs(application)
-    application.post_init = notify_owner_started
 
     log.info("Bot started. Press Ctrl+C to stop.")
     application.run_polling(close_loop=False)
