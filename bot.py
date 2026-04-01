@@ -5,7 +5,7 @@ import logging
 import threading
 import asyncio
 from pathlib import Path
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -25,7 +25,9 @@ from telegram.ext import (
     filters,
 )
 
-# ---------- Setup ----------
+# ============================================================
+# Setup
+# ============================================================
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -37,6 +39,7 @@ STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "8"))
+EVENING_HOUR = int(os.getenv("EVENING_HOUR", "20"))
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -72,31 +75,25 @@ stripe.api_key = STRIPE_SECRET_KEY
 app_flask = Flask(__name__)
 TG_APP: Application | None = None
 
-# Антиповтор для "Заряд"
+# anti-repeat for charge button
 user_last_extra_motivation: dict[int, str] = {}
 
-# ---------- Coach request filters ----------
-COACH_KEYWORDS = (
-    "план", "день", "ціль", "цілі", "дисцип", "фокус", "продуктив",
-    "мотивац", "звич", "саморозвит", "прокраст", "відкладан",
-    "рутин", "енергі", "стрес", "втом", "концентрац", "час",
-    "завдан", "пріоритет", "результ", "розклад", "ранок", "вечір",
-    "рішення", "сумнів", "страх", "дія", "коуч", "звички",
-    "вигоран", "прогрес", "цілеспрям", "успіх", "поштовх",
-    "мета", "звичка", "продуктивність", "організація",
-    "поштовх", "заряд", "особистий розвиток", "прогрес",
-    "менше їсти", "самоконтроль", "звички харчування"
-)
 
-OFFTOPIC_PATTERNS = (
-    "що це", "what is this", "як цим користуватися", "how to use this",
-    "що на фото", "опиши фото", "переклади", "translate",
-    "скільки коштує", "де купити", "новини", "погода", "курс валют",
-    "who is this", "хто це", "намалюй", "створи картинку"
-)
+# ============================================================
+# Helpers
+# ============================================================
+def now_berlin() -> datetime:
+    return datetime.now(BERLIN)
 
 
-# ---------- Data helpers ----------
+def today_str() -> str:
+    return now_berlin().date().isoformat()
+
+
+def parse_date(value: str) -> date:
+    return date.fromisoformat(value)
+
+
 def load_json_list(path: Path, fallback: list[str]) -> list[str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -109,32 +106,15 @@ def load_json_list(path: Path, fallback: list[str]) -> list[str]:
 
 
 def load_motivations() -> list[str]:
-    return load_json_list(
-        MOTIVATIONS_PATH,
-        ["Сьогодні твоя сила — просто не зупинятися."]
-    )
+    return load_json_list(MOTIVATIONS_PATH, ["Сьогодні твоя сила — просто не зупинятися."])
 
 
 def load_tasks() -> list[str]:
-    return load_json_list(
-        TASKS_PATH,
-        ["Зроби одну маленьку, але корисну дію для свого майбутнього."]
-    )
+    return load_json_list(TASKS_PATH, ["Зроби одну маленьку, але корисну дію для свого майбутнього."])
 
 
 def load_tips() -> list[str]:
-    return load_json_list(
-        TIPS_PATH,
-        ["Краще маленький прогрес, ніж велике відкладання."]
-    )
-
-
-def today_str() -> str:
-    return datetime.now(BERLIN).date().isoformat()
-
-
-def parse_date(value: str) -> date:
-    return date.fromisoformat(value)
+    return load_json_list(TIPS_PATH, ["Краще маленький прогрес, ніж велике відкладання."])
 
 
 def load_users_data() -> dict:
@@ -170,9 +150,9 @@ def load_users_data() -> dict:
                     "stripe_subscription_id": "",
                     "panel_message_id": 0,
                 }
-                for k, v in defaults.items():
-                    if k not in user:
-                        user[k] = v
+                for key, value in defaults.items():
+                    if key not in user:
+                        user[key] = value
                         changed = True
             if changed:
                 save_users_data(data)
@@ -191,7 +171,6 @@ def save_users_data(data: dict) -> None:
 def ensure_user(user_id: int) -> dict:
     data = load_users_data()
     uid = str(user_id)
-
     if uid not in data:
         data[uid] = {
             "streak": 0,
@@ -203,20 +182,17 @@ def ensure_user(user_id: int) -> dict:
             "panel_message_id": 0,
         }
         save_users_data(data)
-
     return data[uid]
 
 
 def get_user(user_id: int) -> dict:
     ensure_user(user_id)
-    data = load_users_data()
-    return data.get(str(user_id), {})
+    return load_users_data().get(str(user_id), {})
 
 
 def update_user_fields(user_id: int, **fields) -> None:
     data = load_users_data()
     uid = str(user_id)
-
     if uid not in data:
         data[uid] = {
             "streak": 0,
@@ -227,10 +203,8 @@ def update_user_fields(user_id: int, **fields) -> None:
             "stripe_subscription_id": "",
             "panel_message_id": 0,
         }
-
-    for k, v in fields.items():
-        data[uid][k] = v
-
+    for key, value in fields.items():
+        data[uid][key] = value
     save_users_data(data)
 
 
@@ -276,7 +250,7 @@ def increment_message_count(user_id: int) -> None:
 def update_user_streak(user_id: int) -> tuple[int, bool]:
     data = load_users_data()
     uid = str(user_id)
-    today = datetime.now(BERLIN).date()
+    today = now_berlin().date()
 
     if uid not in data:
         data[uid] = {
@@ -315,6 +289,11 @@ def update_user_streak(user_id: int) -> tuple[int, bool]:
     return streak, lost
 
 
+def touch_user_day(user_id: int) -> None:
+    # Marks activity for today and updates streak only once per day.
+    update_user_streak(user_id)
+
+
 def get_user_streak(user_id: int) -> int:
     return int(get_user(user_id).get("streak", 0))
 
@@ -326,7 +305,7 @@ def get_subscribed_user_ids() -> list[int]:
 
 def get_day_index() -> int:
     base = datetime(2025, 1, 1, tzinfo=BERLIN)
-    now = datetime.now(BERLIN)
+    now = now_berlin()
     return (now.date() - base.date()).days
 
 
@@ -373,7 +352,9 @@ def get_extra_motivation_for_user(user_id: int) -> str:
     return result
 
 
-# ---------- Streak messaging ----------
+# ============================================================
+# Streak text
+# ============================================================
 def get_streak_message(streak: int) -> str:
     if streak >= 21:
         return "🔥 21 день — ти вже інша людина."
@@ -400,16 +381,13 @@ def get_comeback_message() -> str:
     )
 
 
-# ---------- UI ----------
+# ============================================================
+# Stripe
+# ============================================================
 def create_checkout_session(telegram_user_id: int) -> str:
     session = stripe.checkout.Session.create(
         mode="subscription",
-        line_items=[
-            {
-                "price": STRIPE_PRICE_ID,
-                "quantity": 1,
-            }
-        ],
+        line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
         success_url=f"{APP_BASE_URL}/payment-success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{APP_BASE_URL}/payment-cancelled",
         client_reference_id=str(telegram_user_id),
@@ -419,6 +397,24 @@ def create_checkout_session(telegram_user_id: int) -> str:
     return session.url
 
 
+def stripe_attr(obj, key: str, default=None):
+    if obj is None:
+        return default
+    try:
+        value = getattr(obj, key)
+        return default if value is None else value
+    except Exception:
+        pass
+    try:
+        value = obj[key]
+        return default if value is None else value
+    except Exception:
+        return default
+
+
+# ============================================================
+# UI
+# ============================================================
 def panel_keyboard(user_id: int, panel: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -428,24 +424,35 @@ def panel_keyboard(user_id: int, panel: str) -> InlineKeyboardMarkup:
             rows.append([InlineKeyboardButton("💳 Оформити Premium", url=checkout_url)])
         except Exception as e:
             log.warning("Failed to create checkout URL for keyboard: %s", e)
-
+            rows.append([InlineKeyboardButton("🚀 Premium", callback_data="view:premium")])
     elif is_premium(user_id):
         rows.append([InlineKeyboardButton("💎 Premium активний", callback_data="view:premium")])
     else:
         rows.append([InlineKeyboardButton("🚀 Premium", callback_data="view:premium")])
 
-    rows.extend([
-        [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="view:motivation")],
-        [InlineKeyboardButton("⚡ Заряд", callback_data="view:charge")],
-        [InlineKeyboardButton("✅ Завдання дня", callback_data="view:task")],
-        [InlineKeyboardButton("💡 Порада дня", callback_data="view:tip")],
-        [InlineKeyboardButton("🏠 Головне меню", callback_data="view:menu")],
-    ])
+    rows.extend(
+        [
+            [InlineKeyboardButton("🔥 Отримати мотивацію", callback_data="view:motivation")],
+            [InlineKeyboardButton("⚡ Заряд", callback_data="view:charge")],
+            [InlineKeyboardButton("✅ Завдання дня", callback_data="view:task")],
+            [InlineKeyboardButton("💡 Порада дня", callback_data="view:tip")],
+            [InlineKeyboardButton("🏠 Головне меню", callback_data="view:menu")],
+        ]
+    )
 
     if MINI_APP_URL:
         rows.append([InlineKeyboardButton("🧭 Відкрити Mini App", url=MINI_APP_URL)])
 
     return InlineKeyboardMarkup(rows)
+
+
+def daily_quick_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🏠 Відкрити меню", callback_data="view:menu")],
+            [InlineKeyboardButton("⚡ Заряд", callback_data="view:charge")],
+        ]
+    )
 
 
 def build_menu_text(user_id: int, include_comeback: bool = False) -> str:
@@ -458,7 +465,12 @@ def build_menu_text(user_id: int, include_comeback: bool = False) -> str:
         comeback
         + premium_badge
         + "👋 <b>Lemberg Coach</b>\n\n"
-        + "Твій AI-коуч для дисципліни, фокусу і реальної дії.\n\n"
+        + "Я — AI-коуч для дії.\n\n"
+        + "Допомагаю:\n"
+        + "• розкласти ціль на кроки\n"
+        + "• зібрати план на день\n"
+        + "• вийти з прокрастинації\n"
+        + "• почати діяти вже сьогодні\n\n"
         + "Щодня ти отримуєш:\n"
         + "• 🧠 <b>Мотивацію дня</b>\n"
         + "• ✅ <b>Завдання дня</b>\n"
@@ -493,6 +505,7 @@ def build_premium_text(user_id: int) -> str:
             "У тебе вже активний Premium.\n\n"
             "Що відкрито зараз:\n"
             "• GPT-коуч 24/7\n"
+            "• ранкові й вечірні дотики\n"
             "• персональні відповіді під твою ситуацію\n"
             "• швидкий доступ без повторної оплати\n\n"
             "Просто напиши мені повідомлення — і я відповім."
@@ -500,13 +513,14 @@ def build_premium_text(user_id: int) -> str:
 
     return (
         "🚀 <b>Lemberg Coach Premium</b>\n\n"
-        "Це твій персональний AI-коуч, який допомагає:\n"
-        "• не зливати день\n"
-        "• тримати фокус\n"
-        "• швидше приймати рішення\n"
-        "• рухатись без хаосу\n\n"
+        "Це не просто чат.\n\n"
+        "Це система, яка:\n"
+        "• тримає фокус\n"
+        "• не дає зливати день\n"
+        "• повертає тебе в дію\n\n"
         "<b>Що відкривається:</b>\n"
         "• GPT-коуч 24/7\n"
+        "• ранкові й вечірні дотики\n"
         "• персональні відповіді під твої цілі\n"
         "• майбутні premium-функції\n\n"
         "Оформи доступ кнопкою нижче."
@@ -543,6 +557,9 @@ def build_panel_text(user_id: int, panel: str, include_comeback: bool = False) -
     return build_menu_text(user_id)
 
 
+# ============================================================
+# Panel rendering
+# ============================================================
 async def render_panel(user_id: int, panel: str, include_comeback: bool = False) -> None:
     if TG_APP is None:
         return
@@ -573,7 +590,8 @@ async def render_panel(user_id: int, panel: str, include_comeback: bool = False)
                     return
                 except Exception:
                     pass
-
+            if "message to edit not found" in err:
+                set_panel_message_id(user_id, 0)
             log.warning("Panel edit failed for user %s: %s", user_id, e)
 
     sent = await TG_APP.bot.send_message(
@@ -585,24 +603,32 @@ async def render_panel(user_id: int, panel: str, include_comeback: bool = False)
     set_panel_message_id(user_id, sent.message_id)
 
 
-# ---------- Request scope ----------
+# ============================================================
+# Request filter + GPT
+# ============================================================
 def is_coach_request(text: str) -> bool:
-    text = text.lower()
+    text = (text or "").strip().lower()
+    if not text:
+        return False
 
     blocked_keywords = [
-        "код", "python", "javascript", "програмування",
-        "курс валют", "погода", "новини",
-        "переклади", "translate", "википедия"
+        "код",
+        "python",
+        "javascript",
+        "програмування",
+        "напиши програму",
+        "курс валют",
+        "погода",
+        "новини",
+        "переклади",
+        "translate",
+        "вікіпедія",
+        "wikipedia",
     ]
 
-    for word in blocked_keywords:
-        if word in text:
-            return False
-
-    return True
+    return not any(word in text for word in blocked_keywords)
 
 
-# ---------- GPT ----------
 def ask_gpt(user_text: str) -> str:
     if not is_coach_request(user_text):
         return "Я працюю як AI-коуч для дії. Напиши свою ціль або проблему — і я допоможу."
@@ -611,39 +637,34 @@ def ask_gpt(user_text: str) -> str:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.7,
-            max_tokens=240,
+            max_tokens=220,
             messages=[
                 {
                     "role": "system",
-                   "content": (
-    "Ти персональний AI-коуч Lemberg Coach.\n"
-    "Відповідай українською мовою.\n"
-    "Звертайся до користувача на 'ти'.\n\n"
-
-    "Твоя роль — НЕ давати загальні поради, а змушувати людину діяти.\n\n"
-
-    "ПРАВИЛА:\n"
-    "- Не давай списки з інтернету (типу '5 порад').\n"
-    "- Говори як коуч, а не як енциклопедія.\n"
-    "- Фокусуйся на 1–2 конкретних діях.\n"
-    "- Часто став уточнююче питання.\n"
-    "- Іноді говори прямо і жорстко, але без грубості.\n"
-    "- Твоя мета — зрушити людину з місця.\n\n"
-
-    "СТРУКТУРА ВІДПОВІДІ:\n"
-    "1. Коротко скажи, що відбувається з людиною\n"
-    "2. Дай 1 конкретну дію\n"
-    "3. Задай 1 питання або поштовх\n\n"
-
-    "ПРИКЛАД СТИЛЮ:\n"
-    "Ти зараз не зібраний, бо в тебе немає однієї головної задачі.\n"
-    "Назви її.\n"
-    "Що для тебе зараз №1?\n\n"
-
-    "Будь коротким, конкретним і енергійним.\n"
-    "Не пиши довгі відповіді.\n"
-    "Максимум 3–5 речень.\n"
-),
+                    "content": (
+                        "Ти персональний AI-коуч Lemberg Coach.\n"
+                        "Відповідай українською мовою.\n"
+                        "Звертайся до користувача на 'ти'.\n\n"
+                        "Ти працюєш у стилі справжнього коуча, а не менеджера і не енциклопедії.\n"
+                        "Твоя головна задача — через короткі точні запитання допомогти людині самій побачити наступний крок.\n"
+                        "Ти не читаєш лекції і не сиплеш загальними списками з інтернету.\n\n"
+                        "ПРАВИЛА:\n"
+                        "- Не давай 5-10 загальних порад підряд.\n"
+                        "- Зазвичай фокусуйся на 1 головній дії.\n"
+                        "- Часто став 1 сильне уточнююче питання.\n"
+                        "- Можеш дати короткий поштовх або рамку, але не забирай у людини право вибору.\n"
+                        "- Можеш бути прямим, але без грубості.\n"
+                        "- Не пиши довгі відповіді.\n"
+                        "- Максимум 3-5 речень.\n\n"
+                        "СТРУКТУРА ВІДПОВІДІ:\n"
+                        "1. Коротко віддзеркаль, що відбувається з людиною.\n"
+                        "2. Дай 1 фокус або 1 наступний крок.\n"
+                        "3. Постав 1 питання, яке рухає вперед.\n\n"
+                        "ПРИКЛАД:\n"
+                        "Ти зараз розфокусований, бо в тебе немає однієї головної задачі.\n"
+                        "Не хапайся за все.\n"
+                        "Що для тебе сьогодні №1?"
+                    ),
                 },
                 {"role": "user", "content": user_text},
             ],
@@ -654,30 +675,17 @@ def ask_gpt(user_text: str) -> str:
         return "⚠️ GPT тимчасово недоступний. Спробуй ще раз пізніше."
 
 
-def stripe_attr(obj, key: str, default=None):
-    if obj is None:
-        return default
-    try:
-        value = getattr(obj, key)
-        return default if value is None else value
-    except Exception:
-        pass
-    try:
-        value = obj[key]
-        return default if value is None else value
-    except Exception:
-        return default
-
-
-# ---------- Premium notify ----------
-async def send_premium_activated_message(user_id: int):
+# ============================================================
+# Premium events
+# ============================================================
+async def send_premium_activated_message(user_id: int) -> None:
     if TG_APP is None:
         return
 
     text = (
-        "🎉 <b>Вітаємо! Premium активовано.</b>\n\n"
-        "Тепер тобі доступний GPT-коуч 24/7.\n"
-        "Просто напиши мені повідомлення — і я відповім."
+        "🎉 <b>Premium активовано.</b>\n\n"
+        "Тепер я твій AI-коуч 24/7.\n"
+        "Напиши свою ціль або задачу."
     )
 
     try:
@@ -695,7 +703,9 @@ async def send_premium_activated_message(user_id: int):
         log.warning("Failed to refresh panel after premium activation: %s", e)
 
 
-# ---------- Telegram handlers ----------
+# ============================================================
+# Telegram handlers
+# ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat:
         return
@@ -713,16 +723,23 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat or not update.effective_message:
+    if not update.effective_message:
         return
-    now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
+    now = now_berlin().strftime("%Y-%m-%d %H:%M:%S")
     await update.effective_message.reply_text(f"✅ Пінг! {now} (Europe/Berlin)")
 
 
 async def streak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
+    if not update.effective_chat or not update.effective_message:
         return
-    await render_panel(update.effective_chat.id, "menu")
+    streak = get_user_streak(update.effective_chat.id)
+    if streak <= 0:
+        await update.effective_message.reply_text("🔥 Серія ще не почалась. Натисни /start і починай ритм.")
+        return
+    await update.effective_message.reply_text(
+        f"🔥 <b>Твоя серія:</b> {streak} дн.\n{get_streak_message(streak)}",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -739,12 +756,23 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not query:
+    if not query or not query.message:
         return
 
     await query.answer()
     user_id = query.from_user.id
     data = query.data or ""
+    stored_panel_id = get_panel_message_id(user_id)
+    clicked_message_id = query.message.message_id
+
+    # Stale message: remove its keyboard and redirect to live panel.
+    if stored_panel_id and clicked_message_id != stored_panel_id:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await render_panel(user_id, "menu")
+        return
 
     if data.startswith("view:"):
         panel = data.split(":", 1)[1]
@@ -757,7 +785,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-
     await update.effective_message.reply_text(
         "📷 Я поки не аналізую фото в цьому боті.\n\n"
         "Опиши словами свою ситуацію, ціль або проблему — і я допоможу як коуч."
@@ -767,7 +794,6 @@ async def unsupported_media(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def unsupported_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-
     await update.effective_message.reply_text(
         "🎤 Голосові я поки не аналізую.\n\n"
         "Напиши текстом свою ціль, проблему або ситуацію — і я допоможу."
@@ -785,6 +811,7 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     ensure_user(user_id)
+    touch_user_day(user_id)
 
     if not is_premium(user_id):
         await update.effective_message.reply_text(
@@ -798,7 +825,9 @@ async def chat_with_coach(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text(reply)
 
 
-# ---------- Scheduler ----------
+# ============================================================
+# Scheduler / retention
+# ============================================================
 async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
     content = today_content()
     users = get_subscribed_user_ids()
@@ -817,31 +846,59 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
                 chat_id=uid,
                 text=text,
                 parse_mode=ParseMode.HTML,
+                reply_markup=daily_quick_keyboard(),
             )
         except Exception as e:
             log.warning("Failed to send daily push to %s: %s", uid, e)
 
 
-def schedule_jobs(app: Application) -> None:
-    run_time = datetime.now(BERLIN).replace(
-        hour=DAILY_HOUR,
-        minute=0,
-        second=0,
-        microsecond=0,
-    ).timetz()
-
-    if app.job_queue is None:
-        log.warning("JobQueue is not available. Daily push was not scheduled.")
+async def evening_checkin(context: ContextTypes.DEFAULT_TYPE) -> None:
+    users = get_subscribed_user_ids()
+    if not users:
         return
 
-    app.job_queue.run_daily(daily_push, time=run_time, name="daily_push_berlin")
+    text = (
+        "🌙 <b>Вечірній check-in</b>\n\n"
+        "Що ти сьогодні реально завершив?\n"
+        "Напиши 1 результат без відмазок."
+    )
+
+    for uid in users:
+        if not is_premium(uid):
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=daily_quick_keyboard(),
+            )
+        except Exception as e:
+            log.warning("Failed to send evening check-in to %s: %s", uid, e)
+
+
+def schedule_jobs(app: Application) -> None:
+    if app.job_queue is None:
+        log.warning("JobQueue is not available. Jobs were not scheduled.")
+        return
+
+    app.job_queue.run_daily(
+        daily_push,
+        time=time(hour=DAILY_HOUR, minute=0, tzinfo=BERLIN),
+        name="daily_push_berlin",
+    )
+    app.job_queue.run_daily(
+        evening_checkin,
+        time=time(hour=EVENING_HOUR, minute=0, tzinfo=BERLIN),
+        name="evening_checkin_berlin",
+    )
 
 
 async def notify_owner_started(app: Application) -> None:
     if not OWNER_ID:
         return
     try:
-        now = datetime.now(BERLIN).strftime("%Y-%m-%d %H:%M:%S")
+        now = now_berlin().strftime("%Y-%m-%d %H:%M:%S")
         await app.bot.send_message(
             chat_id=OWNER_ID,
             text=f"✅ BOT запущений ({now}, Europe/Berlin).",
@@ -851,7 +908,9 @@ async def notify_owner_started(app: Application) -> None:
         log.warning("Owner notify failed: %s", e)
 
 
-# ---------- Web ----------
+# ============================================================
+# Web
+# ============================================================
 @app_flask.route("/health", methods=["GET"])
 def health():
     return jsonify({"ok": True}), 200
@@ -916,7 +975,6 @@ def stripe_webhook():
 
         if tg_raw and str(tg_raw).isdigit():
             tg_user_id = int(tg_raw)
-
             set_premium(
                 tg_user_id,
                 True,
@@ -941,7 +999,6 @@ def stripe_webhook():
         subscription_id = str(stripe_attr(obj, "id", "") or "")
         status = str(stripe_attr(obj, "status", "") or "")
         tg_user_id = find_user_id_by_subscription(subscription_id)
-
         if tg_user_id and status not in ("active", "trialing"):
             set_premium(tg_user_id, False)
             log.info("Premium disabled for Telegram user %s (status=%s)", tg_user_id, status)
@@ -953,7 +1010,9 @@ def run_web_server() -> None:
     app_flask.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
 
-# ---------- Main ----------
+# ============================================================
+# Main
+# ============================================================
 def main() -> None:
     global TG_APP
 
